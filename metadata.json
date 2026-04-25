@@ -1,0 +1,6 @@
+{
+  "name": "Nova Live",
+  "description": "An end-to-end AI chat experience with real-time voice and video capabilities powered by Gemini.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["AI Chat", "Voice Interaction", "Video Processing"]
+}

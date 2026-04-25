@@ -1,0 +1,59 @@
+{
+  "entities": {
+    "user": {
+      "title": "User",
+      "description": "Represents a user in the system",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The unique identifier for the user" },
+        "displayName": { "type": "string", "description": "The name shown to other users" },
+        "email": { "type": "string", "description": "The user's email address" },
+        "photoURL": { "type": "string", "description": "URL to the user's profile picture" },
+        "status": { "type": "string", "description": "Optional status message", "enum": ["online", "offline", "away"] },
+        "lastSeen": { "type": "string", "format": "date-time", "description": "When the user was last active" }
+      },
+      "required": ["uid", "displayName", "email"]
+    },
+    "chat": {
+      "title": "Chat",
+      "description": "A conversation between multiple users or a user and AI",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier for the chat" },
+        "participants": { "type": "array", "items": { "type": "string" }, "description": "List of user UIDs participating in the chat" },
+        "lastMessage": { "type": "string", "description": "Snippet of the last message sent" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last time the chat was updated" },
+        "type": { "type": "string", "enum": ["private", "ai"], "description": "Whether it's a human-human or human-ai chat" }
+      },
+      "required": ["id", "participants", "updatedAt", "type"]
+    },
+    "message": {
+      "title": "Message",
+      "description": "A single message within a chat",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier for the message" },
+        "chatId": { "type": "string", "description": "ID of the chat this message belongs to" },
+        "senderId": { "type": "string", "description": "UID of the user who sent the message (or 'ai')" },
+        "content": { "type": "string", "description": "The text content of the message" },
+        "type": { "type": "string", "enum": ["text", "audio", "video"], "description": "The type of content" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When the message was sent" }
+      },
+      "required": ["id", "chatId", "senderId", "content", "type", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "user",
+      "description": "User profile data"
+    },
+    "/chats/{chatId}": {
+      "schema": "chat",
+      "description": "Chat session metadata"
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": "message",
+      "description": "Messages within a specific chat"
+    }
+  }
+}
