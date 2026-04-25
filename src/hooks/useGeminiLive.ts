@@ -101,11 +101,13 @@ export function useGeminiLive() {
               for (let i = 0; i < binaryString.length; i++) {
                 bytes[i] = binaryString.charCodeAt(i);
               }
-              // Convert 16-bit PCM to Float32
+              // Convert 16-bit PCM to Float32 and boost volume
               const pcm16 = new Int16Array(bytes.buffer);
               const float32 = new Float32Array(pcm16.length);
+              const VOLUME_BOOST = 3.0;
               for (let i = 0; i < pcm16.length; i++) {
-                float32[i] = pcm16[i] / 32768.0;
+                // Boost volume and clamp between -1.0 and 1.0 to prevent clipping distortion
+                float32[i] = Math.max(-1, Math.min(1, (pcm16[i] / 32768.0) * VOLUME_BOOST));
               }
               audioQueueRef.current.push(float32);
               playNextInQueue();
