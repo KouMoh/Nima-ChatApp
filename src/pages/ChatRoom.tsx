@@ -473,22 +473,24 @@ export default function ChatRoom() {
                   <div className="flex-1 w-full max-w-4xl mx-auto flex flex-col gap-4 overflow-hidden relative border border-zinc-800 rounded-2xl bg-[#0a0a0a]">
                     
                     {/* Top Half: AI Messages */}
-                    <div className="flex-1 overflow-y-auto flex flex-col gap-2 md:gap-3 p-4 md:p-6 custom-scrollbar relative">
+                    <div className="flex-1 overflow-y-auto flex flex-col p-4 md:p-6 custom-scrollbar relative">
                       {messages.filter(m => m.senderId === 'ai').length === 0 ? (
                         <div className="text-zinc-500 text-center italic mt-auto mb-auto font-medium">AI responses will appear here.</div>
                       ) : (
-                        messages.filter(m => m.senderId === 'ai').map((m) => (
-                          <motion.div 
-                            key={m.id}
-                            initial={{ opacity: 0, y: 10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            className="px-3 py-1 md:px-4 md:py-1 rounded-[12px] md:rounded-[14px] text-[14px] md:text-[15px] leading-tight max-w-[85%] md:max-w-[75%] shadow-sm text-left w-fit bg-[#18181b] border border-[#27272a] self-start text-zinc-300 rounded-tl-sm"
-                          >
-                            {m.content}
-                          </motion.div>
-                        ))
+                        <div className="flex flex-col gap-2 md:gap-3 mt-auto">
+                          {messages.filter(m => m.senderId === 'ai').map((m) => (
+                            <motion.div 
+                              key={m.id}
+                              initial={{ opacity: 0, y: 10 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="px-3 py-1 md:px-4 md:py-1 rounded-[12px] md:rounded-[14px] text-[14px] md:text-[15px] leading-tight max-w-[85%] md:max-w-[75%] shadow-sm text-left w-fit bg-[#18181b] border border-[#27272a] self-start text-zinc-300 rounded-tl-sm"
+                            >
+                              {m.content}
+                            </motion.div>
+                          ))}
+                          <div ref={scrollRef} className="h-2 shrink-0" />
+                        </div>
                       )}
-                      <div ref={scrollRef} className="h-2 shrink-0" />
                     </div>
 
                     <div className="w-full h-px bg-[#27272a] shrink-0" />
