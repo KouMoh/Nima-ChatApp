@@ -14,10 +14,37 @@ export function useGeminiLive() {
   const processorRef = useRef<AudioWorkletNode | ScriptProcessorNode | null>(null);
   const audioQueueRef = useRef<Float32Array[]>([]);
   const isPlayingRef = useRef(false);
+  const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  const startSilenceTimer = useCallback(() => {
+    clearSilenceTimer();
+    silenceTimerRef.current = setTimeout(() => {
+      if (sessionRef.current) {
+        sessionRef.current.sendRealtimeInput({
+          text: "System prompt: The user has been completely silent. Please say something proactively about the topic, ask the user to speak up, or give a very soft, playful warning that you will stop if they don't answer."
+        });
+      }
+    }, 2500); // Trigger after 2.5 seconds of silence
+  }, [clearSilenceTimer]);
 
   // Buffer to store audio chunks for gapless playback
   const playNextInQueue = useCallback(() => {
-    if (!audioContextRef.current || audioQueueRef.current.length === 0 || isPlayingRef.current) return;
+    if (!audioContextRef.current || audioQueueRef.current.length === 0 || isPlayingRef.current) {
+       if (!isPlayingRef.current && sessionRef.current) {
+         startSilenceTimer();
+       }
+       return;
+    }
+
+    clearSilenceTimer(); // AI is playing audio, no silence timer
 
     isPlayingRef.current = true;
     const chunk = audioQueueRef.current.shift()!;
@@ -28,13 +55,18 @@ export function useGeminiLive() {
     source.buffer = audioBuffer;
     source.connect(audioContextRef.current.destination);
     source.onended = () => {
-      isPlayingRef.current = false;
-      playNextInQueue();
+      if (currentAudioSourceRef.current === source) {
+        isPlayingRef.current = false;
+        currentAudioSourceRef.current = null;
+        playNextInQueue();
+      }
     };
+    currentAudioSourceRef.current = source;
     source.start();
-  }, []);
+  }, [clearSilenceTimer, startSilenceTimer]);
 
   const stop = useCallback(() => {
+    clearSilenceTimer();
     if (sessionRef.current) {
       sessionRef.current.close();
       sessionRef.current = null;
@@ -117,11 +149,24 @@ export function useGeminiLive() {
             if (message.serverContent?.interrupted) {
               audioQueueRef.current = [];
               isPlayingRef.current = false;
+              if (currentAudioSourceRef.current) {
+                currentAudioSourceRef.current.onended = null;
+                try { currentAudioSourceRef.current.stop(); } catch(e) {}
+                currentAudioSourceRef.current = null;
+              }
             }
           },
-          onerror: (err) => {
-            console.error("Live session error:", err);
-            setError(err.message);
+          onerror: (err: any) => {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            if (errorMessage.includes("Network error") || errorMessage.includes("abnormal")) {
+              console.warn("Live session connection dropped (Network error). You may need to restart the session.");
+            } else {
+              console.error("Live session error:", err);
+            }
+            if (errorMessage.includes("Network error") && !isActive) {
+              return;
+            }
+            setError(errorMessage);
             stop();
           },
           onclose: () => {
@@ -134,12 +179,28 @@ export function useGeminiLive() {
 
       processor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
-        // Convert to 16-bit PCM
+        
+        // Convert to 16-bit PCM and calculate user volume
+        let sumSquares = 0;
         const pcm16 = new Int16Array(inputData.length);
         for (let i = 0; i < inputData.length; i++) {
+          sumSquares += inputData[i] * inputData[i];
           pcm16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
         }
         
+        const rms = Math.sqrt(sumSquares / inputData.length);
+        if (rms > 0.02) {
+          // User is speaking, clear the silence timer and any queued playback to respond instantly
+          clearSilenceTimer();
+          audioQueueRef.current = [];
+          if (isPlayingRef.current && currentAudioSourceRef.current) {
+            currentAudioSourceRef.current.onended = null;
+            try { currentAudioSourceRef.current.stop(); } catch(e) {}
+            isPlayingRef.current = false;
+            currentAudioSourceRef.current = null;
+          }
+        }
+
         const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
         sessionRef.current?.sendRealtimeInput({
           audio: { data: base64, mimeType: 'audio/pcm;rate=16000' }

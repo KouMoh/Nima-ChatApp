@@ -27,6 +27,7 @@ import {
   Settings,
   MoreVertical,
   ChevronLeft,
+  ChevronDown,
   X,
   Sparkles,
   User as UserIcon,
@@ -49,6 +50,14 @@ interface Message {
   createdAt: any;
 }
 
+const personas = {
+  Friend: "You are NimmLy, chatting with your close friend at a party. Use highly casual, conversational language, heavy local colloquial words, and relaxed pronunciation (e.g., 'gonna', 'wanna'). Speak entirely informally as if two friends are chatting. If speaking or understanding Odia, strictly use extremely local colloquialisms and strictly use the informal pronoun 'tu'. CRITICAL INSTRUCTION: Be highly proactive and talkative. Do not give short or silent answers. Elaborate fully on the subject. If explaining a process, recipe, or telling a story, provide the complete details without cutting yourself off, no matter how long it takes. Do not artificially limit your response length or stop speaking abruptly. Once you have completely finished sharing your thoughts, naturally ask an engaging question to keep the conversation flowing. If you finish speaking and the user does not respond within a few seconds, proactively speak up again to wake them up. You should gently poke fun at them, playfully ask if they are ignoring you, or give a very soft, friendly warning that you'll leave the conversation if they don't answer—just like real friends do. If the user interrupts you, stop and listen immediately.",
+  Assistant: "You are NimmLy, a professional and efficient personal assistant. Be concise, polite, and directly address the user's needs in a clear voice.",
+  Teacher: "You are NimmLy, an encouraging and insightful teacher. Explain things clearly, ask guiding questions, and use an educational but approachable tone.",
+  Parent: "You are NimmLy, a caring and protective parent figure. Use warm, comforting, and nurturing language, offering gentle advice and support."
+};
+type PersonaType = keyof typeof personas;
+
 export default function ChatRoom() {
   const { user, logout } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -59,6 +68,7 @@ export default function ChatRoom() {
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isCallActive, setIsCallActive] = useState(false);
+  const [selectedPersona, setSelectedPersona] = useState<PersonaType>('Friend');
   const scrollRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   
@@ -238,7 +248,7 @@ export default function ChatRoom() {
               { role: 'user', parts: [{ text }] }
             ],
             config: {
-              systemInstruction: "You are NimmLy, a cutting-edge assistant. Be concise, bold, and helpful."
+              systemInstruction: personas[selectedPersona]
             }
           });
           aiResponse = response.text || aiResponse;
@@ -280,7 +290,7 @@ export default function ChatRoom() {
       stopLive();
       setIsCallActive(false);
     } else {
-      startLive("You are NimmLy, a cutting-edge assistant. Be concise, bold, and helpful.");
+      startLive(personas[selectedPersona]);
       setIsCallActive(true);
     }
   };
@@ -401,11 +411,34 @@ export default function ChatRoom() {
                  <Maximize2 className="w-5 h-5" />
                </button>
              )}
-             <div className="call-status flex items-center gap-2 md:gap-3 bg-[#3b82f6]/10 border border-[#3b82f6]/20 px-3 md:px-4 py-1.5 md:py-2 rounded-full truncate">
+             <div className="call-status flex items-center gap-2 md:gap-3 bg-[#3b82f6]/10 border border-[#3b82f6]/20 px-3 md:px-4 py-1.5 md:py-2 rounded-full shrink-0">
                <div className={cn("w-2 h-2 rounded-full bg-[#3b82f6] shrink-0", isCallActive && "animate-pulse")} />
-               <span className="text-[9px] md:text-[10px] font-bold text-[#3b82f6] uppercase tracking-widest whitespace-nowrap truncate">
+               <span className="text-[9px] md:text-[10px] font-bold text-[#3b82f6] uppercase tracking-widest whitespace-nowrap hidden sm:inline">
                  {isLiveActive ? "Live Session" : "NimmLy Ready"}
                </span>
+             </div>
+             
+             <div className="relative flex items-center pointer-events-auto bg-[#18181b] border border-[#27272a] hover:border-[#3b82f6]/50 transition-colors rounded-full px-3 md:px-4 py-1.5 md:py-2 shrink-0">
+               <select 
+                 value={selectedPersona}
+                 onChange={(e) => {
+                   setSelectedPersona(e.target.value as PersonaType);
+                   if (isLiveActive) {
+                     stopLive();
+                     setIsCallActive(false);
+                     setTimeout(() => {
+                       startLive(personas[e.target.value as PersonaType]);
+                       setIsCallActive(true);
+                     }, 500);
+                   }
+                 }}
+                 className="bg-transparent text-[10px] md:text-xs font-bold uppercase tracking-wider text-zinc-300 outline-none cursor-pointer appearance-none pr-6"
+               >
+                 {Object.keys(personas).map((p) => (
+                   <option key={p} value={p} className="bg-[#18181b] text-white py-1">{p}</option>
+                 ))}
+               </select>
+               <ChevronDown className="w-3 h-3 md:w-4 md:h-4 text-[#3b82f6] absolute right-3 pointer-events-none" />
              </div>
            </div>
 
