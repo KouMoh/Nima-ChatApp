@@ -35,7 +35,9 @@ import {
   Phone,
   PhoneOff,
   Maximize2,
-  SquarePen
+  SquarePen,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
@@ -51,12 +53,21 @@ interface Message {
 }
 
 const personas = {
-  Friend: "You are NimmLy, chatting with your close friend at a party. Use highly casual, conversational language, heavy local colloquial words, and relaxed pronunciation (e.g., 'gonna', 'wanna'). Speak entirely informally as if two friends are chatting. If speaking or understanding Odia, strictly use extremely local colloquialisms and strictly use the informal pronoun 'tu'. CRITICAL INSTRUCTION: Be highly proactive and talkative. Do not give short or silent answers. Elaborate fully on the subject. If explaining a process, recipe, or telling a story, provide the complete details without cutting yourself off, no matter how long it takes. Do not artificially limit your response length or stop speaking abruptly. Once you have completely finished sharing your thoughts, naturally ask an engaging question to keep the conversation flowing. If you finish speaking and the user does not respond within a few seconds, proactively speak up again to wake them up. You should gently poke fun at them, playfully ask if they are ignoring you, or give a very soft, friendly warning that you'll leave the conversation if they don't answer—just like real friends do. If the user interrupts you, stop and listen immediately.",
+  Friend: "You are NimmLy, chatting with your close friend. Use highly casual, conversational language, heavy local colloquial words, and relaxed pronunciation (e.g., 'gonna', 'wanna'). The tone is extremely laid-back, like relaxing at a party, but DO NOT say you are at a party. Pay close attention to the user's mood and adapt your own mood and energy to match theirs naturally—don't default to being overly excited all the time. Speak entirely informally as if two friends are hanging out. If speaking or understanding Odia, strictly use extremely local colloquialisms and strictly use the informal pronoun 'tu'. CRITICAL INSTRUCTION: Be highly proactive and talkative. Do not give short or silent answers. Elaborate fully on the subject. If explaining a process, recipe, or telling a story, provide the complete details without cutting yourself off, no matter how long it takes. Do not artificially limit your response length or stop speaking abruptly. Once you have completely finished sharing your thoughts, naturally ask an engaging question to keep the conversation flowing. If you finish speaking and the user does not respond within a few seconds, proactively speak up again to wake them up. You should gently poke fun at them, playfully ask if they are ignoring you, or give a very soft, friendly warning that you'll leave the conversation if they don't answer—just like real friends do. If the user interrupts you, stop and listen immediately.",
   Assistant: "You are NimmLy, a professional and efficient personal assistant. Be concise, polite, and directly address the user's needs in a clear voice.",
   Teacher: "You are NimmLy, an encouraging and insightful teacher. Explain things clearly, ask guiding questions, and use an educational but approachable tone.",
   Parent: "You are NimmLy, a caring and protective parent figure. Use warm, comforting, and nurturing language, offering gentle advice and support."
 };
 type PersonaType = keyof typeof personas;
+
+const voices = {
+  Aoede: 'Aoede (Female)',
+  Kore: 'Kore (Female)',
+  Puck: 'Puck (Male)',
+  Charon: 'Charon (Male)',
+  Fenrir: 'Fenrir (Male)'
+};
+type VoiceType = keyof typeof voices;
 
 export default function ChatRoom() {
   const { user, logout } = useAuth();
@@ -69,12 +80,13 @@ export default function ChatRoom() {
   const [isMuted, setIsMuted] = useState(false);
   const [isCallActive, setIsCallActive] = useState(false);
   const [selectedPersona, setSelectedPersona] = useState<PersonaType>('Friend');
+  const [selectedVoice, setSelectedVoice] = useState<VoiceType>('Aoede');
   const scrollRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   
   const [chatSessions, setChatSessions] = useState<any[]>([]);
   
-  const { start: startLive, stop: stopLive, isActive: isLiveActive, aiTranscription } = useGeminiLive();
+  const { start: startLive, stop: stopLive, isActive: isLiveActive, aiTranscription, volume, setVolume } = useGeminiLive();
 
   // Load chat sessions
   useEffect(() => {
@@ -290,7 +302,7 @@ export default function ChatRoom() {
       stopLive();
       setIsCallActive(false);
     } else {
-      startLive(personas[selectedPersona]);
+      startLive(personas[selectedPersona], selectedVoice);
       setIsCallActive(true);
     }
   };
@@ -404,8 +416,8 @@ export default function ChatRoom() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col relative z-0 w-full">
         {/* Top Bar */}
-        <header className="absolute top-0 w-full z-50 p-4 md:p-8 flex items-center justify-between gap-4 pointer-events-none">
-           <div className="flex items-center gap-2 md:gap-4 overflow-hidden pointer-events-auto">
+         <header className="absolute top-0 w-full z-50 p-4 md:p-8 flex flex-wrap items-center justify-between gap-4 pointer-events-none">
+           <div className="flex flex-wrap items-center gap-2 md:gap-4 pointer-events-auto">
              {!isSidebarOpen && (
                <button onClick={() => setIsSidebarOpen(true)} className="p-2.5 bg-[#18181b] rounded-xl text-white shrink-0">
                  <Maximize2 className="w-5 h-5" />
@@ -418,7 +430,8 @@ export default function ChatRoom() {
                </span>
              </div>
              
-             <div className="relative flex items-center pointer-events-auto bg-[#18181b] border border-[#27272a] hover:border-[#3b82f6]/50 transition-colors rounded-full px-3 md:px-4 py-1.5 md:py-2 shrink-0">
+             <div className="relative flex items-center pointer-events-auto bg-[#18181b] border border-[#27272a] hover:border-[#3b82f6]/50 transition-colors rounded-full px-3 md:px-4 py-1.5 md:py-2 shrink-0 h-10 md:h-12">
+               <span className="text-[10px] text-zinc-500 mr-2 font-bold uppercase hidden md:inline">Persona</span>
                <select 
                  value={selectedPersona}
                  onChange={(e) => {
@@ -427,7 +440,7 @@ export default function ChatRoom() {
                      stopLive();
                      setIsCallActive(false);
                      setTimeout(() => {
-                       startLive(personas[e.target.value as PersonaType]);
+                       startLive(personas[e.target.value as PersonaType], selectedVoice);
                        setIsCallActive(true);
                      }, 500);
                    }
@@ -440,9 +453,33 @@ export default function ChatRoom() {
                </select>
                <ChevronDown className="w-3 h-3 md:w-4 md:h-4 text-[#3b82f6] absolute right-3 pointer-events-none" />
              </div>
+
+             <div className="relative flex items-center pointer-events-auto bg-[#18181b] border border-[#27272a] hover:border-[#3b82f6]/50 transition-colors rounded-full px-3 md:px-4 py-1.5 md:py-2 shrink-0 h-10 md:h-12">
+               <span className="text-[10px] text-zinc-500 mr-2 font-bold uppercase hidden md:inline">Voice</span>
+               <select 
+                 value={selectedVoice}
+                 onChange={(e) => {
+                   setSelectedVoice(e.target.value as VoiceType);
+                   if (isLiveActive) {
+                     stopLive();
+                     setIsCallActive(false);
+                     setTimeout(() => {
+                       startLive(personas[selectedPersona], e.target.value as VoiceType);
+                       setIsCallActive(true);
+                     }, 500);
+                   }
+                 }}
+                 className="bg-transparent text-[10px] md:text-xs font-bold uppercase tracking-wider text-zinc-300 outline-none cursor-pointer appearance-none pr-6 max-w-[100px] md:max-w-none text-ellipsis"
+               >
+                 {Object.entries(voices).map(([val, label]) => (
+                   <option key={val} value={val} className="bg-[#18181b] text-white py-1">{label}</option>
+                 ))}
+               </select>
+               <ChevronDown className="w-3 h-3 md:w-4 md:h-4 text-[#3b82f6] absolute right-3 pointer-events-none" />
+             </div>
            </div>
 
-           <div className="flex items-center gap-2 pointer-events-auto">
+           <div className="flex flex-wrap items-center justify-end gap-2 pointer-events-auto">
               {activeView === 'text' && (
                 <button 
                   onClick={() => setActiveView('home')}
@@ -451,6 +488,21 @@ export default function ChatRoom() {
                   <X className="w-4 h-4 shrink-0" /> <span className="hidden sm:inline whitespace-nowrap">Close Chat</span>
                 </button>
               )}
+              <div className="flex items-center gap-2 bg-[#18181b] border border-[#27272a] rounded-xl md:rounded-2xl px-2 md:px-3 h-10 md:h-12 hidden md:flex shrink-0 group hover:border-[#3b82f6]/50 transition-colors">
+                <button onClick={() => setVolume(v => v === 0 ? 1 : 0)} className="text-zinc-400 hover:text-[#3b82f6] transition-colors" title="AI Volume">
+                   {volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                </button>
+                <input 
+                  type="range" 
+                  min="0" 
+                  max="3" 
+                  step="0.1" 
+                  value={volume} 
+                  onChange={(e) => setVolume(parseFloat(e.target.value))}
+                  className="w-16 md:w-20 accent-[#3b82f6] opacity-50 group-hover:opacity-100 transition-opacity cursor-pointer"
+                  title={`Volume: ${Math.round(volume * 100)}%`}
+                />
+              </div>
               <button 
                 onClick={() => setIsMuted(!isMuted)}
                 className="w-10 h-10 md:w-12 md:h-12 bg-[#18181b] rounded-xl md:rounded-2xl flex items-center justify-center hover:bg-[#27272a] transition-all"

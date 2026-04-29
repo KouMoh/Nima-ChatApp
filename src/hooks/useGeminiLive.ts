@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { ai } from '../lib/gemini';
-import { Modality, LiveServerMessage } from '@google/genai';
+import { Modality, LiveServerMessage, Type } from '@google/genai';
 
 export function useGeminiLive() {
   const [isActive, setIsActive] = useState(false);
@@ -17,6 +17,13 @@ export function useGeminiLive() {
   const currentAudioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  const [volume, setVolume] = useState(1.0);
+  const volumeRef = useRef(1.0);
+
+  useEffect(() => {
+    volumeRef.current = volume;
+  }, [volume]);
+
   const clearSilenceTimer = useCallback(() => {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
@@ -28,8 +35,12 @@ export function useGeminiLive() {
     clearSilenceTimer();
     silenceTimerRef.current = setTimeout(() => {
       if (sessionRef.current) {
-        sessionRef.current.sendRealtimeInput({
-          text: "System prompt: The user has been completely silent. Please say something proactively about the topic, ask the user to speak up, or give a very soft, playful warning that you will stop if they don't answer."
+        sessionRef.current.sendClientContent({
+          turns: [{
+            role: "user",
+            parts: [{text: "System prompt: The user has been completely silent. Please say something proactively about the topic, ask the user to speak up, or give a very soft, playful warning that you will stop if they don't answer."}]
+          }],
+          turnComplete: true
         });
       }
     }, 2500); // Trigger after 2.5 seconds of silence
@@ -82,7 +93,7 @@ export function useGeminiLive() {
     setIsActive(false);
   }, []);
 
-  const start = useCallback(async (systemInstruction: string = "You are a helpful assistant.") => {
+  const start = useCallback(async (systemInstruction: string = "You are a helpful assistant.", voiceName: string = "Aoede") => {
     try {
       setError(null);
       
@@ -107,11 +118,27 @@ export function useGeminiLive() {
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } },
           },
-          systemInstruction,
+          systemInstruction: { parts: [{ text: systemInstruction }] },
           outputAudioTranscription: {},
           inputAudioTranscription: {},
+          tools: [{
+            functionDeclarations: [{
+              name: 'set_ai_volume',
+              description: 'Sets your own audio volume. Use this whenever the user asks you to speak louder, quieter, reduce your volume, etc. The default volume is 1.0. Max is 3.0, min is 0.1.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  new_volume: {
+                    type: Type.NUMBER,
+                    description: "The requested volume level between 0.1 (very quiet) and 3.0 (very loud)."
+                  }
+                },
+                required: ["new_volume"]
+              }
+            }]
+          }]
         },
         callbacks: {
           onopen: () => {
@@ -124,6 +151,28 @@ export function useGeminiLive() {
             if (message.serverContent?.modelTurn?.parts?.[0]?.text) {
               setAiTranscription(prev => prev + message.serverContent?.modelTurn?.parts?.[0]?.text);
             }
+
+            // Function calling (Tools)
+            if (message.toolCall?.functionCalls) {
+              for (const call of message.toolCall.functionCalls) {
+                if (call.name === 'set_ai_volume') {
+                  const newVol = (call.args as any)?.new_volume;
+                  const finalVol = typeof newVol === 'number' ? newVol : 1.0;
+                  setVolume(finalVol);
+                  console.log("Volume updated by AI to:", finalVol);
+                  
+                  if (sessionRef.current) {
+                    sessionRef.current.sendToolResponse({
+                      functionResponses: [{
+                        id: call.id,
+                        name: call.name,
+                        response: { result: `Volume successfully set to ${finalVol}` }
+                      }]
+                    });
+                  }
+                }
+              }
+            }
             
             // Audio output
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
@@ -133,10 +182,10 @@ export function useGeminiLive() {
               for (let i = 0; i < binaryString.length; i++) {
                 bytes[i] = binaryString.charCodeAt(i);
               }
-              // Convert 16-bit PCM to Float32 and boost volume
+              // Convert 16-bit PCM to Float32 and apply volume modifier
               const pcm16 = new Int16Array(bytes.buffer);
               const float32 = new Float32Array(pcm16.length);
-              const VOLUME_BOOST = 3.0;
+              const VOLUME_BOOST = 3.0 * volumeRef.current;
               for (let i = 0; i < pcm16.length; i++) {
                 // Boost volume and clamp between -1.0 and 1.0 to prevent clipping distortion
                 float32[i] = Math.max(-1, Math.min(1, (pcm16[i] / 32768.0) * VOLUME_BOOST));
@@ -190,15 +239,8 @@ export function useGeminiLive() {
         
         const rms = Math.sqrt(sumSquares / inputData.length);
         if (rms > 0.02) {
-          // User is speaking, clear the silence timer and any queued playback to respond instantly
+          // User is speaking, clear the silence timer
           clearSilenceTimer();
-          audioQueueRef.current = [];
-          if (isPlayingRef.current && currentAudioSourceRef.current) {
-            currentAudioSourceRef.current.onended = null;
-            try { currentAudioSourceRef.current.stop(); } catch(e) {}
-            isPlayingRef.current = false;
-            currentAudioSourceRef.current = null;
-          }
         }
 
         const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
@@ -220,5 +262,5 @@ export function useGeminiLive() {
     };
   }, [stop]);
 
-  return { start, stop, isActive, error, transcription, aiTranscription };
+  return { start, stop, isActive, error, transcription, aiTranscription, volume, setVolume };
 }
