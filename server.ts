@@ -30,6 +30,55 @@ async function startServer() {
     next();
   });
 
+  app.use(express.json());
+
+  // Indian Kanoon API Proxy
+  app.post("/api/indian-kanoon/search", async (req, res) => {
+    try {
+      if (!process.env.INDIAN_KANOON_API_KEY) {
+        return res.status(400).json({ error: "INDIAN_KANOON_API_KEY is not set." });
+      }
+      const { query, pagenum = 0 } = req.body;
+      const response = await fetch(`https://api.indiankanoon.org/search/?formInput=${encodeURIComponent(query)}&pagenum=${pagenum}`, {
+        headers: {
+          'Authorization': `Token ${process.env.INDIAN_KANOON_API_KEY}`,
+          'Accept': 'application/json'
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Indian Kanoon API error: ${response.statusText}`);
+      }
+      const data = await response.json();
+      res.json(data);
+    } catch (e: any) {
+      console.error("Indian Kanoon search error:", e);
+      res.status(500).json({ error: e.message || "Failed to search Indian Kanoon" });
+    }
+  });
+
+  app.post("/api/indian-kanoon/doc", async (req, res) => {
+    try {
+      if (!process.env.INDIAN_KANOON_API_KEY) {
+        return res.status(400).json({ error: "INDIAN_KANOON_API_KEY is not set." });
+      }
+      const { docId } = req.body;
+      const response = await fetch(`https://api.indiankanoon.org/doc/${docId}/`, {
+        headers: {
+          'Authorization': `Token ${process.env.INDIAN_KANOON_API_KEY}`,
+          'Accept': 'application/json'
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Indian Kanoon API error: ${response.statusText}`);
+      }
+      const data = await response.json();
+      res.json(data);
+    } catch (e: any) {
+      console.error("Indian Kanoon get doc error:", e);
+      res.status(500).json({ error: e.message || "Failed to get document from Indian Kanoon" });
+    }
+  });
+
   // API Route for file extraction
   app.post("/api/extract", upload.single("file"), async (req, res) => {
     try {

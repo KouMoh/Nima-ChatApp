@@ -178,6 +178,38 @@ export function useGeminiLive(options?: { onTurnComplete?: (text: string) => voi
                   },
                   required: []
                 }
+              },
+              {
+                name: 'search_indian_kanoon',
+                description: 'Search the Indian Kanoon database for case laws, judgments, and legal documents. It returns a list of matching cases with doc sizes and titles.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    query: {
+                      type: Type.STRING,
+                      description: "The search query, e.g., 'murder sections', 'right to privacy'."
+                    },
+                    pagenum: {
+                      type: Type.NUMBER,
+                      description: "The page number for pagination, starting at 0."
+                    }
+                  },
+                  required: ["query"]
+                }
+              },
+              {
+                name: 'get_indian_kanoon_document',
+                description: 'Retrieve the full text of a specific Indian Kanoon document using its document ID. Usually used after searching.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    docId: {
+                      type: Type.STRING,
+                      description: "The Indian Kanoon document ID (a number string, e.g., '123456')."
+                    }
+                  },
+                  required: ["docId"]
+                }
               }
             ]
           }]
@@ -249,6 +281,42 @@ export function useGeminiLive(options?: { onTurnComplete?: (text: string) => voi
                 } else if (call.name === 'prompt_user_for_file_upload') {
                   setRequestedFileId(call.id);
                   console.log("AI requested file upload");
+                } else if (call.name === 'search_indian_kanoon') {
+                  fetch('/api/indian-kanoon/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: (call.args as any)?.query, pagenum: (call.args as any)?.pagenum || 0 })
+                  }).then(r => r.json()).then(data => {
+                    if (sessionRef.current) {
+                      sessionRef.current.sendToolResponse({
+                        functionResponses: [{ id: call.id, name: call.name, response: { result: data } }]
+                      });
+                    }
+                  }).catch(e => {
+                    if (sessionRef.current) {
+                      sessionRef.current.sendToolResponse({
+                        functionResponses: [{ id: call.id, name: call.name, response: { error: e.message } }]
+                      });
+                    }
+                  });
+                } else if (call.name === 'get_indian_kanoon_document') {
+                  fetch('/api/indian-kanoon/doc', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ docId: String((call.args as any)?.docId) })
+                  }).then(r => r.json()).then(data => {
+                    if (sessionRef.current) {
+                      sessionRef.current.sendToolResponse({
+                        functionResponses: [{ id: call.id, name: call.name, response: { result: data } }]
+                      });
+                    }
+                  }).catch(e => {
+                    if (sessionRef.current) {
+                      sessionRef.current.sendToolResponse({
+                        functionResponses: [{ id: call.id, name: call.name, response: { error: e.message } }]
+                      });
+                    }
+                  });
                 }
               }
             }
