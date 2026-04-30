@@ -36,12 +36,14 @@ import {
   Maximize2,
   SquarePen,
   Volume2,
-  VolumeX
+  VolumeX,
+  FileText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
-import { ai } from '../lib/gemini';
+import { ai, isApiKeyValid } from '../lib/gemini';
 import { FindingsPanel } from '../components/FindingsPanel';
+import { UploadedDocumentsPanel } from '../components/UploadedDocumentsPanel';
 
 // Message Interface
 interface Message {
@@ -87,11 +89,30 @@ const toMillis = (value: any) => {
   return Number.isNaN(parsed) ? 0 : parsed;
 };
 
+const formatSessionTime = (timestamp: any) => {
+  if (!timestamp) return '';
+  const date = timestamp.toDate ? timestamp.toDate() : new Date(toMillis(timestamp));
+  if (isNaN(date.getTime())) return '';
+  
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yy = String(date.getFullYear()).slice(-2);
+  
+  let hours = date.getHours();
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12;
+  hours = hours ? hours : 12;
+  const hh = String(hours).padStart(2, '0');
+  
+  return `${dd}/${mm}/${yy} ${hh}:${minutes} ${ampm}`;
+};
+
 const generateTitleFromAiResponse = async (text: string) => {
   const fallback = buildFallbackTitle(text);
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-3-flash-preview",
       contents: [{
         role: 'user',
         parts: [{
@@ -165,6 +186,10 @@ export default function ChatRoom() {
   const [findings, setFindings] = useState<string>("");
   const [isFindingsExpanded, setIsFindingsExpanded] = useState(false);
   const [allowAutoSelect, setAllowAutoSelect] = useState(true);
+  const [documents, setDocuments] = useState<any[]>([]);
+  const [isDocumentsExpanded, setIsDocumentsExpanded] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   
   const activeChatRef = useRef(activeChat);
   const chatSessionsRef = useRef(chatSessions);
@@ -230,9 +255,12 @@ export default function ChatRoom() {
     if ('addEventListener' in media) {
       media.addEventListener('change', update);
       return () => media.removeEventListener('change', update);
+    } else {
+      // @ts-ignore
+      media.addListener(update);
+      // @ts-ignore
+      return () => media.removeListener(update);
     }
-    media.addListener(update);
-    return () => media.removeListener(update);
   }, []);
 
   useEffect(() => {
@@ -240,16 +268,23 @@ export default function ChatRoom() {
   }, [isDesktop]);
 
   const updateFindings = async (chatId: string, currentMessages: Message[]) => {
-    if (currentMessages.length === 0) return;
+    if (currentMessages.length === 0 && documents.length === 0) return;
     
     try {
       const history = currentMessages.slice(-20).map(m => `${m.senderId === 'ai' ? 'AI' : 'User'}: ${m.content}`).join('\n');
+      const docsContext = documents.map(d => `Document: ${d.name}\nContent: ${d.text}`).join('\n---\n');
+      
       const response = await ai.models.generateContent({
-        model: "gemini-1.5-flash",
+        model: "gemini-3-flash-preview",
         config: {
-          systemInstruction: "You are a professional legal clerk. Analyze the provided conversation and extract only the relevant case facts, legal points, discovered verdicts, and action items. Format them as a clean, bulleted Case Summary. Ignore small talk. Be concise and professional. If information is already present, update and refine the summary."
+          systemInstruction: "You are a professional legal clerk. Analyze the provided conversation and uploaded documents. Extract only the relevant case facts, legal points, discovered verdicts, and action items. Format them as a clean, bulleted Case Summary. Ignore small talk. Be concise and professional. If information is already present, update and refine the summary based on NEW information."
         },
-        contents: [{ role: 'user', parts: [{ text: `Conversation History:\n${history}\n\nProvide the latest relevant findings summary.` }] }]
+        contents: [{ 
+          role: 'user', 
+          parts: [{ 
+            text: `UPLOADED DOCUMENTS:\n${docsContext}\n\nCONVERSATION HISTORY:\n${history}\n\nProvide the latest relevant findings summary.` 
+          }] 
+        }]
       });
       
       const distilled = (response as any).candidates?.[0]?.content?.parts?.[0]?.text || "";
@@ -262,6 +297,29 @@ export default function ChatRoom() {
       }
     } catch (err) {
       console.error("Findings synthesis failed:", err);
+    }
+  };
+
+  const updateSessionTitleOnClose = async (chatId: string, currentMessages: Message[]) => {
+    if (currentMessages.length === 0) return;
+    
+    try {
+      const history = currentMessages.slice(-20).map(m => `${m.senderId === 'ai' ? 'AI' : 'User'}: ${m.content}`).join('\n');
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: [{ role: 'user', parts: [{ text: `Generate a short, concise topic title (max 5 words) for the following conversation. Return ONLY the title text, no quotes, no prefixes.\n\nConversation History:\n${history}` }] }]
+      });
+      
+      let newTitle = (response as any).candidates?.[0]?.content?.parts?.[0]?.text || "";
+      newTitle = stripWrappingQuotes(newTitle.trim());
+      if (newTitle) {
+        await setDoc(doc(db, 'chats', chatId), {
+          title: newTitle,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
+    } catch (err) {
+      console.error("Session title generation failed:", err);
     }
   };
 
@@ -371,7 +429,7 @@ export default function ChatRoom() {
     }
   };
 
-  const { start: startLive, stop: stopLive, isActive: isLiveActive, aiTranscription, transcription: userTranscription, volume, setVolume, requestedFileId, provideFileToAi } = useGeminiLive({
+  const { start: startLive, stop: stopLive, isActive: isLiveActive, aiTranscription, transcription: userTranscription, volume, setVolume, requestedFileId, provideFileToAi, sendToAi } = useGeminiLive({
     onTurnComplete: async (text) => {
       if (!text.trim()) return;
 
@@ -551,6 +609,31 @@ export default function ChatRoom() {
     return unsubscribe;
   }, [activeChat]);
 
+  // Fetch documents for the active chat
+  useEffect(() => {
+    if (!activeChat || activeChat === DRAFT_CHAT_ID) {
+      setDocuments([]);
+      return;
+    }
+
+    const docQuery = query(
+      collection(db, 'chats', activeChat, 'documents'),
+      orderBy('createdAt', 'desc')
+    );
+
+    const unsubscribeDocs = onSnapshot(docQuery, (snapshot) => {
+      const docs = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setDocuments(docs);
+    }, (error) => {
+      console.error("Firestore Documents Error:", error);
+    });
+
+    return unsubscribeDocs;
+  }, [activeChat]);
+
   // Scroll to bottom
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -567,6 +650,68 @@ export default function ChatRoom() {
     }
   }, [isVideoEnabled]);
 
+  const handleFileUpload = async (file: File) => {
+    if (!activeChat || activeChat === DRAFT_CHAT_ID) return;
+    setIsUploading(true);
+    setUploadError(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/extract", {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      
+      let data;
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        data = await res.json();
+      } else {
+        const textResult = await res.text();
+        console.error("Non-JSON response:", textResult.substring(0, 500));
+        if (textResult.includes("Cookie check") || textResult.includes("cookie-check")) {
+          throw new Error("Upload blocked by preview proxy. Please click 'Open App' (Arrow icon top right) to use file uploads in a new tab.");
+        }
+        throw new Error(`Server returned an invalid non-JSON response. Status: ${res.status}. Output: ${textResult.substring(0, 100)}`);
+      }
+      
+      if (!res.ok) throw new Error(data.error || "Extraction failed");
+      
+      await addDoc(collection(db, 'chats', activeChat, 'documents'), {
+        name: data.name || file.name,
+        text: data.text,
+        createdAt: serverTimestamp()
+      });
+      
+      if (isLiveActive) {
+        sendToAi(`I just uploaded a document named "${data.name || file.name}". Here is its content:\n\n${data.text}`);
+      }
+      
+    } catch (err: any) {
+      console.error(err);
+      setUploadError(err.message || "Failed to upload.");
+      setTimeout(() => setUploadError(null), 8000);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const getHistoryContext = () => {
+    let context = "";
+    if (documents.length > 0) {
+      context += "THE FOLLOWING DOCUMENTS HAVE BEEN UPLOADED TO THIS SESSION:\n";
+      context += documents.map(d => `Document: ${d.name}\nContent: ${d.text}`).join('\n---\n');
+      context += "\n\n";
+    }
+
+    if (messagesRef.current.length > 0) {
+       context += "CONVERSATION HISTORY:\n";
+       context += messagesRef.current.map(m => `[${m.senderId === 'ai' ? 'NimmLy' : 'User'}]: ${m.content}`).join('\n\n');
+    }
+    return context;
+  };
+
   const toggleCall = async () => {
     if (isCallActive) {
       const currentChatId = activeChatRef.current;
@@ -576,6 +721,7 @@ export default function ChatRoom() {
 
       if (userTranscription?.trim() && user) {
         const userMessage = buildLocalMessage(user.uid, userTranscription, 'audio');
+        localMessages = [...localMessages, userMessage];
         if (canPersist) {
           try {
             await addDoc(collection(db, 'chats', currentChatId as string, 'messages'), {
@@ -587,12 +733,14 @@ export default function ChatRoom() {
             });
           } catch (err) {}
         } else {
-          localMessages = appendLocalMessage(userMessage);
+          setMessages(localMessages);
+          messagesRef.current = localMessages;
         }
       }
 
       if (aiTranscription.trim()) {
         const aiMessage = buildLocalMessage('ai', aiTranscription, 'audio');
+        localMessages = [...localMessages, aiMessage];
         if (canPersist) {
           try {
             await addDoc(collection(db, 'chats', currentChatId as string, 'messages'), {
@@ -604,7 +752,8 @@ export default function ChatRoom() {
             });
           } catch (err) {}
         } else {
-          localMessages = appendLocalMessage(aiMessage);
+          setMessages(localMessages);
+          messagesRef.current = localMessages;
         }
       }
 
@@ -612,7 +761,10 @@ export default function ChatRoom() {
         const newChatId = await persistDraftChat(aiTranscription, localMessages, sessionMode);
         if (newChatId) {
           updateFindings(newChatId, localMessages);
+          updateSessionTitleOnClose(newChatId, localMessages);
         }
+      } else if (canPersist) {
+        updateSessionTitleOnClose(currentChatId as string, localMessages);
       }
 
       stopLive();
@@ -641,11 +793,7 @@ export default function ChatRoom() {
         }, { merge: true });
       }
       
-      let historyContext = "";
-      const currentMessages = messagesRef.current;
-      if (currentMessages.length > 0) {
-         historyContext = currentMessages.map(m => `[${m.senderId === 'ai' ? 'NimmLy' : 'User'}]: ${m.content}`).join('\n\n');
-      }
+      const historyContext = getHistoryContext();
       startLive(personas[selectedPersona], selectedVoice, historyContext);
       setIsCallActive(true);
     }
@@ -669,6 +817,35 @@ export default function ChatRoom() {
         </h1>
       </div>
 
+      <AnimatePresence>
+        {!isApiKeyValid && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            className="fixed top-0 left-0 right-0 z-[100] bg-amber-500/10 border-b border-amber-500/20 backdrop-blur-md"
+          >
+            <div className="max-w-7xl mx-auto px-4 py-2 flex items-center justify-center gap-3 text-amber-500 text-[10px] md:text-xs font-medium">
+              <Sparkles className="w-3 h-3 md:w-4 md:h-4" />
+              <span>AI features require a valid API key. Go to <strong className="font-bold">Settings (Gear icon) → API Keys</strong> to add yours.</span>
+            </div>
+          </motion.div>
+        )}
+        {uploadError && (
+          <motion.div
+            initial={{ opacity: 0, y: -50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -50 }}
+            className="fixed top-20 left-1/2 -translate-x-1/2 z-[100] max-w-md w-full px-4"
+          >
+            <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 shadow-2xl backdrop-blur-md flex items-start gap-3 text-red-400 text-sm">
+              <span className="text-red-500">⚠</span>
+              <p>{uploadError}</p>
+              <button onClick={() => setUploadError(null)} className="ml-auto text-red-500 hover:text-red-400">×</button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Sidebar */}
       <AnimatePresence mode="wait">
         {(isSidebarOpen || isDesktop) && (
@@ -681,41 +858,39 @@ export default function ChatRoom() {
               !isSidebarOpen && "border-none"
             )}
           >
-            <div className="p-6 flex flex-col gap-8 h-full">
-              <div className="flex items-center justify-between pb-4">
-                <h1 className="text-2xl font-black tracking-[-1px] uppercase font-['Space_Grotesk'] text-[#3b82f6]">NimmLy</h1>
-                <button onClick={() => setIsSidebarOpen(false)} className="text-zinc-500 p-2 hover:bg-zinc-800 rounded-lg">
-                   <X className="w-5 h-5" />
+            <div className="p-4 md:p-5 flex flex-col gap-4 md:gap-6 h-full">
+              <div className="flex items-center justify-between pb-2 md:pb-4">
+                <h1 className="text-xl md:text-2xl font-black tracking-[-1px] uppercase font-['Space_Grotesk'] text-[#3b82f6]">NimmLy</h1>
+                <button onClick={() => setIsSidebarOpen(false)} className="text-zinc-500 p-1.5 md:p-2 hover:bg-zinc-800 rounded-lg">
+                   <X className="w-4 h-4 md:w-5 md:h-5" />
                 </button>
               </div>
 
-              <div className="flex items-center justify-between px-1 pb-4 border-b border-zinc-800">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-[#18181b] flex items-center justify-center overflow-hidden border border-white/5 shrink-0">
-                     {user?.photoURL ? <img src={user.photoURL} alt="p" className="w-full h-full object-cover" /> : <UserIcon className="w-5 h-5 text-zinc-500" />}
+              <div className="flex items-center justify-between px-1 pb-3 md:pb-4 border-b border-zinc-800">
+                <div className="flex items-center gap-2 md:gap-3">
+                  <div className="w-8 h-8 md:w-10 md:h-10 rounded-xl bg-[#18181b] flex items-center justify-center overflow-hidden border border-white/5 shrink-0">
+                     {user?.photoURL ? <img src={user.photoURL} alt="p" className="w-full h-full object-cover" /> : <UserIcon className="w-4 h-4 md:w-5 md:h-5 text-zinc-500" />}
                   </div>
                   <div className="overflow-hidden">
-                     <p className="text-xs font-bold truncate">{user?.displayName}</p>
-                     <p className="text-[10px] text-zinc-500 font-medium">Pro Account</p>
+                     <p className="text-[11px] md:text-xs font-bold truncate">{user?.displayName}</p>
+                     <p className="text-[9px] md:text-[10px] text-zinc-500 font-medium">Pro Account</p>
                   </div>
                 </div>
-                <button onClick={logout} className="text-red-500/80 hover:text-red-500 p-2 rounded-lg transition-all" title="Sign Out">
-                   <LogOut className="w-4 h-4" />
+                <button onClick={logout} className="text-red-500/80 hover:text-red-500 p-1.5 md:p-2 rounded-lg transition-all" title="Sign Out">
+                   <LogOut className="w-3.5 h-3.5 md:w-4 md:h-4" />
                 </button>
               </div>
 
-              <div className="pt-2 border-t border-zinc-800/50 mt-2">
+              <div className="pt-2 md:pt-4 flex-1 overflow-y-auto scrollbar-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
                 <button 
                   onClick={startNewChat}
-                  className="w-full flex items-center gap-3 px-3 py-2.5 text-zinc-300 hover:text-white hover:bg-[#18181b] rounded-lg text-sm font-medium transition-all"
+                  className="w-full flex items-center gap-2.5 md:gap-3 px-2.5 md:px-3 py-2 md:py-2.5 text-zinc-300 hover:text-white hover:bg-[#18181b] rounded-lg text-xs md:text-sm font-medium transition-all mb-4"
                 >
-                  <SquarePen className="w-4 h-4" />
+                  <SquarePen className="w-3.5 h-3.5 md:w-4 md:h-4" />
                   <span>New chat</span>
                 </button>
-              </div>
 
-              <div className="pt-4 flex-1 overflow-y-auto scrollbar-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-                <h3 className="text-xs font-semibold text-white mb-2 px-3">Chats</h3>
+                <h3 className="text-[10px] md:text-xs font-semibold text-white mb-2 px-2.5 md:px-3 opacity-80">Recent Chats</h3>
                 <div className="space-y-0.5">
                    {visibleChatSessions.map(session => (
                      <button
@@ -733,10 +908,15 @@ export default function ChatRoom() {
                          if (session.mode === 'video') setIsVideoEnabled(true);
                          if (session.mode === 'voice' || session.mode === 'text') setIsVideoEnabled(false);
                        }}
-                      className={cn("w-full text-left max-w-full overflow-hidden text-ellipsis whitespace-nowrap px-3 py-2 rounded-lg text-[13px] transition-all font-medium text-[#e4e4e7] hover:bg-[#27272a]/50 hover:text-white", activeChat === session.id && "bg-[#27272a]/80 text-white")}
+                      className={cn("w-full text-left flex flex-col gap-0.5 max-w-full overflow-hidden px-3 py-2 rounded-lg transition-all text-[#e4e4e7] hover:bg-[#27272a]/50 hover:text-white", activeChat === session.id && "bg-[#27272a]/80 text-white")}
                        title={session.title || 'Untitled Session'}
                      >
-                       {session.title || 'Untitled Session'}
+                       <span className="truncate w-full font-medium text-[13px]">
+                         {session.title || 'Untitled Session'}
+                       </span>
+                       <span className="text-[10px] text-zinc-500 font-normal">
+                         {formatSessionTime(session.updatedAt || session.createdAt)}
+                       </span>
                      </button>
                    ))}
                 </div>
@@ -754,27 +934,22 @@ export default function ChatRoom() {
           paddingRight: isDesktop && isFindingsExpanded ? FINDINGS_WIDTH : 0
         }}
       >
-        {/* Top Bar */}
-         <header className="absolute top-0 w-full z-50 p-4 md:p-8 pointer-events-none">
-           <div className="w-full flex flex-wrap items-start justify-between gap-2 md:gap-3 pointer-events-auto">
+             {/* Top Bar */}
+         <header className="w-[95%] lg:w-[80%] mx-auto z-50 p-2 sm:p-4 pointer-events-none flex flex-row flex-wrap items-center justify-between gap-2 shrink-0">
+           <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 pointer-events-auto">
             {!isSidebarOpen && (
-              <button onClick={() => setIsSidebarOpen(true)} className="p-2.5 bg-[#18181b] rounded-xl text-white shrink-0">
-                <Maximize2 className="w-5 h-5" />
+              <button onClick={() => setIsSidebarOpen(true)} className="p-1.5 sm:p-2 bg-[#18181b] rounded-lg text-white shrink-0 hover:bg-[#27272a] transition-colors">
+                <Maximize2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               </button>
             )}
-            <div className="call-status flex items-center gap-2 md:gap-3 bg-[#3b82f6]/10 border border-[#3b82f6]/20 px-3 md:px-4 py-1.5 md:py-2 rounded-full shrink-0">
-              <div className={cn("w-2 h-2 rounded-full bg-[#3b82f6] shrink-0", isCallActive && "animate-pulse")} />
-              <span className="text-[9px] md:text-[10px] font-bold text-[#3b82f6] uppercase tracking-widest whitespace-nowrap hidden sm:inline">
-                {isCallActive ? (isLiveActive ? "Voice Session Live" : "Connecting...") : "Voice Assistant Ready"}
+            <div className="call-status flex items-center gap-1 sm:gap-1.5 bg-[#3b82f6]/10 border border-[#3b82f6]/20 px-2 sm:px-2.5 h-6 sm:h-7 rounded-full shrink-0">
+              <div className={cn("w-1.5 h-1.5 rounded-full bg-[#3b82f6] shrink-0", isCallActive && "animate-pulse")} />
+              <span className="text-[8px] sm:text-[9px] font-bold text-[#3b82f6] uppercase tracking-wider whitespace-nowrap">
+                {isCallActive ? (isLiveActive ? "Live" : "Wait...") : "Ready"}
               </span>
             </div>
 
-            <div className="px-3 md:px-4 h-10 md:h-12 rounded-full border border-[#27272a] bg-[#18181b] flex items-center text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-zinc-300">
-              Voice Mode
-            </div>
-             
-             <div className="relative flex items-center pointer-events-auto bg-[#18181b] border border-[#27272a] hover:border-[#3b82f6]/50 transition-colors rounded-full px-3 md:px-4 py-1.5 md:py-2 shrink-0 h-10 md:h-12">
-               <span className="text-[10px] text-zinc-500 mr-2 font-bold uppercase hidden md:inline">Persona</span>
+            <div className="relative flex items-center pointer-events-auto bg-[#18181b] border border-[#27272a] hover:border-[#3b82f6]/50 transition-colors rounded-full px-2 sm:px-2.5 h-6 sm:h-7 shrink-0">
                <select 
                  value={selectedPersona}
                  onChange={async (e) => {
@@ -811,27 +986,23 @@ export default function ChatRoom() {
                      stopLive();
                      setIsCallActive(false);
                      
-                     let historyContext = "";
-                     if (messages.length > 0) {
-                        historyContext = messages.map(m => `[${m.senderId === 'ai' ? 'NimmLy' : 'User'}]: ${m.content}`).join('\n\n');
-                     }
+                     const historyContext = getHistoryContext();
                      setTimeout(() => {
                        startLive(personas[newPersona], selectedVoice, historyContext);
                        setIsCallActive(true);
                      }, 500);
                    }
                  }}
-                 className="bg-transparent text-[10px] md:text-xs font-bold uppercase tracking-wider text-zinc-300 outline-none cursor-pointer appearance-none pr-6"
+                 className="bg-transparent text-[8px] sm:text-[9px] font-bold uppercase tracking-wider text-zinc-300 outline-none cursor-pointer appearance-none pr-4 sm:pr-5"
                >
                  {Object.keys(personas).map((p) => (
-                   <option key={p} value={p} className="bg-[#18181b] text-white py-1">{p}</option>
+                   <option key={p} value={p} className="bg-[#18181b] text-white py-1">{p === 'Le _ Discuss' ? 'Legal' : p}</option>
                  ))}
                </select>
-               <ChevronDown className="w-3 h-3 md:w-4 md:h-4 text-[#3b82f6] absolute right-3 pointer-events-none" />
+               <ChevronDown className="w-2.5 h-2.5 text-[#3b82f6] absolute right-1.5 sm:right-2 pointer-events-none" />
              </div>
 
-             <div className="relative flex items-center pointer-events-auto bg-[#18181b] border border-[#27272a] hover:border-[#3b82f6]/50 transition-colors rounded-full px-3 md:px-4 py-1.5 md:py-2 shrink-0 h-10 md:h-12">
-               <span className="text-[10px] text-zinc-500 mr-2 font-bold uppercase hidden md:inline">Voice</span>
+             <div className="relative flex items-center pointer-events-auto bg-[#18181b] border border-[#27272a] hover:border-[#3b82f6]/50 transition-colors rounded-full px-2 sm:px-2.5 h-6 sm:h-7 shrink-0">
                <select 
                  value={selectedVoice}
                  onChange={async (e) => {
@@ -868,45 +1039,63 @@ export default function ChatRoom() {
                      stopLive();
                      setIsCallActive(false);
                      
-                     let historyContext = "";
-                     if (messages.length > 0) {
-                        historyContext = messages.map(m => `[${m.senderId === 'ai' ? 'NimmLy' : 'User'}]: ${m.content}`).join('\n\n');
-                     }
+                     const historyContext = getHistoryContext();
                      setTimeout(() => {
                        startLive(personas[selectedPersona], newVoice, historyContext);
                        setIsCallActive(true);
                      }, 500);
                    }
                  }}
-                 className="bg-transparent text-[10px] md:text-xs font-bold uppercase tracking-wider text-zinc-300 outline-none cursor-pointer appearance-none pr-6 max-w-25 md:max-w-none text-ellipsis"
+                 className="bg-transparent text-[8px] sm:text-[9px] font-bold uppercase tracking-wider text-zinc-300 outline-none cursor-pointer appearance-none pr-4 sm:pr-5 max-w-16 sm:max-w-none text-ellipsis"
                >
                  {Object.entries(voices).map(([val, label]) => (
-                   <option key={val} value={val} className="bg-[#18181b] text-white py-1">{label}</option>
+                   <option key={val} value={val} className="bg-[#18181b] text-white py-1">{val}</option>
                  ))}
                </select>
-               <ChevronDown className="w-3 h-3 md:w-4 md:h-4 text-[#3b82f6] absolute right-3 pointer-events-none" />
+               <ChevronDown className="w-2.5 h-2.5 text-[#3b82f6] absolute right-1.5 sm:right-2 pointer-events-none" />
              </div>
            </div>
 
-           <div className="flex flex-wrap items-center justify-end gap-2 pointer-events-auto ml-auto">
+           <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 pointer-events-auto justify-end">
             {activeChat && (
-              <button 
-                onClick={() => setIsFindingsExpanded(!isFindingsExpanded)}
-                className={cn(
-                  "flex items-center gap-2 px-3 md:px-4 h-10 md:h-12 rounded-xl md:rounded-2xl transition-all text-[10px] md:text-xs font-black uppercase tracking-widest border shadow-lg",
-                  isFindingsExpanded 
-                    ? "bg-[#3b82f6] text-white border-[#3b82f6] shadow-[#3b82f6]/20" 
-                    : "bg-[#18181b] text-zinc-400 hover:text-white border-[#27272a]"
-                )}
-                id="findings-toggle"
-              >
-                <Sparkles className="w-4 h-4" />
-                <span className="hidden sm:inline">Findings</span>
-              </button>
+              <>
+                <button 
+                  onClick={() => {
+                    setIsFindingsExpanded(!isFindingsExpanded);
+                    if (!isFindingsExpanded) setIsDocumentsExpanded(false);
+                  }}
+                  className={cn(
+                    "flex items-center gap-1.5 px-2 sm:px-2.5 h-6 sm:h-7 rounded-lg transition-all text-[8px] sm:text-[9px] font-bold uppercase tracking-wider border shadow-lg",
+                    isFindingsExpanded 
+                      ? "bg-[#3b82f6] text-white border-[#3b82f6] shadow-[#3b82f6]/20" 
+                      : "bg-[#18181b] text-zinc-400 hover:text-white border-[#27272a]"
+                  )}
+                  id="findings-toggle"
+                >
+                  <Sparkles className="w-3 h-3 min-w-[12px]" />
+                  <span>Findings</span>
+                </button>
+                <button 
+                  onClick={() => {
+                    setIsDocumentsExpanded(!isDocumentsExpanded);
+                    if (!isDocumentsExpanded) setIsFindingsExpanded(false);
+                  }}
+                  className={cn(
+                    "flex items-center gap-1.5 px-2 sm:px-2.5 h-6 sm:h-7 rounded-lg transition-all text-[8px] sm:text-[9px] font-bold uppercase tracking-wider border shadow-lg",
+                    isDocumentsExpanded 
+                      ? "bg-[#3b82f6] text-white border-[#3b82f6] shadow-[#3b82f6]/20" 
+                      : "bg-[#18181b] text-zinc-400 hover:text-white border-[#27272a]"
+                  )}
+                  id="documents-toggle"
+                >
+                  <FileText className="w-3 h-3 min-w-[12px]" />
+                  <span>Docs</span>
+                </button>
+              </>
             )}
-              <div className="items-center gap-2 bg-[#18181b] border border-[#27272a] rounded-xl md:rounded-2xl px-2 md:px-3 h-10 md:h-12 hidden md:flex shrink-0 group hover:border-[#3b82f6]/50 transition-colors">
+              <div className="items-center gap-1 sm:gap-1.5 bg-[#18181b] border border-[#27272a] rounded-lg px-2 h-6 sm:h-7 hidden md:flex shrink-0 group hover:border-[#3b82f6]/50 transition-colors">
                 <button onClick={() => setVolume(v => v === 0 ? 1 : 0)} className="text-zinc-400 hover:text-[#3b82f6] transition-colors" title="AI Volume">
-                   {volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                   {volume === 0 ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
                 </button>
                 <input 
                   type="range" 
@@ -915,31 +1104,25 @@ export default function ChatRoom() {
                   step="0.1" 
                   value={volume} 
                   onChange={(e) => setVolume(parseFloat(e.target.value))}
-                  className="w-16 md:w-20 accent-[#3b82f6] opacity-50 group-hover:opacity-100 transition-opacity cursor-pointer"
+                  className="w-10 sm:w-14 accent-[#3b82f6] opacity-50 group-hover:opacity-100 transition-opacity cursor-pointer h-1"
                   title={`Volume: ${Math.round(volume * 100)}%`}
                 />
               </div>
               <button 
-                onClick={() => setIsMuted(!isMuted)}
-                className="w-10 h-10 md:w-12 md:h-12 bg-[#18181b] rounded-xl md:rounded-2xl flex items-center justify-center hover:bg-[#27272a] transition-all"
-              >
-                {isMuted ? <MicOff className="w-4 h-4 md:w-5 md:h-5 text-red-500" /> : <Mic className="w-4 h-4 md:w-5 md:h-5" />}
-              </button>
-              <button 
                 onClick={toggleCall}
                 className={cn(
-                  "px-4 md:px-6 h-10 md:h-12 rounded-xl md:rounded-2xl flex items-center justify-center text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all",
+                  "px-2 sm:px-3 h-6 sm:h-7 rounded-lg flex items-center justify-center gap-1.5 text-[8px] sm:text-[9px] font-bold uppercase tracking-wider transition-all shrink-0",
                   isCallActive ? "bg-red-500 text-white" : "bg-white text-black hover:bg-zinc-200"
                 )}
               >
-                <span className="hidden sm:inline">{isCallActive ? "End Session" : "Start Voice Assistant"}</span>
-                <span className="sm:hidden">{isCallActive ? <PhoneOff className="w-4 h-4" /> : <Phone className="w-4 h-4" />}</span>
+                <span>{isCallActive ? "End" : "Start"}</span>
+                <span className="sm:hidden">{isCallActive ? <PhoneOff className="w-3 h-3" /> : <Phone className="w-3 h-3" />}</span>
               </button>
            </div>
         </header>
 
         {/* Unified Discovery Workspace (Bold Typography Theme) */}
-        <div className="flex-1 flex flex-col relative overflow-hidden w-full pt-28 pb-32">
+        <div className="flex-1 flex flex-col relative overflow-hidden w-full pt-4 pb-32">
           {activeChat ? (
             <div className="flex-1 flex flex-col w-full max-w-5xl mx-auto px-4 md:px-8 gap-6 overflow-hidden">
                {/* Live Session Status */}
@@ -1024,6 +1207,14 @@ export default function ChatRoom() {
           onClose={() => setIsFindingsExpanded(false)} 
         />
 
+        <UploadedDocumentsPanel
+          documents={documents}
+          isOpen={isDocumentsExpanded}
+          onClose={() => setIsDocumentsExpanded(false)}
+          onUpload={handleFileUpload}
+          isUploading={isUploading}
+        />
+
         {/* Video Overlay (Floating) */}
         <AnimatePresence>
           {isVideoEnabled && (
@@ -1073,6 +1264,7 @@ export default function ChatRoom() {
                             const res = await fetch("/api/extract", {
                               method: "POST",
                               body: formData,
+                              credentials: "include",
                             });
                             
                             let data;
@@ -1081,15 +1273,28 @@ export default function ChatRoom() {
                               data = await res.json();
                             } else {
                               const textResult = await res.text();
-                              console.error("Non-JSON response:", textResult.substring(0, 200));
-                              throw new Error("Server returned an invalid non-JSON response.");
+                              console.error("Non-JSON response:", textResult.substring(0, 500));
+                              if (textResult.includes("Cookie check") || textResult.includes("cookie-check")) {
+                                throw new Error("Upload blocked by preview proxy. Please click 'Open App' (Arrow icon top right) to use file uploads in a new tab.");
+                              }
+                              throw new Error(`Server returned an invalid non-JSON response. Status: ${res.status}. Output: ${textResult.substring(0, 100)}`);
                             }
                             
                             if (!res.ok) throw new Error(data.error || "Extraction failed");
                             
-                            provideFileToAi(data.text, data.name);
+                            if (activeChat && activeChat !== DRAFT_CHAT_ID) {
+                              await addDoc(collection(db, 'chats', activeChat, 'documents'), {
+                                name: data.name || file.name,
+                                text: data.text,
+                                createdAt: serverTimestamp()
+                              });
+                            }
+                            
+                            provideFileToAi(data.text, data.name || file.name);
                           } catch (err) {
                             console.error(err);
+                            setUploadError((err as Error).message || "Failed to upload.");
+                            setTimeout(() => setUploadError(null), 8000);
                             provideFileToAi("Error: Failed to process the file: " + (err as Error).message, file.name);
                           }
                         }

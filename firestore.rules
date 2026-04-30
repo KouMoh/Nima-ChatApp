@@ -52,6 +52,13 @@ service cloud.firestore {
 
       allow read: if isSignedIn(); 
       allow create: if isSignedIn() && isValidId(messageId) && isValidMessage(incoming());
+      allow delete: if isSignedIn();
+    }
+    // Chat Documents Rules
+    match /chats/{chatId}/documents/{documentId} {
+      allow read: if isSignedIn(); 
+      allow create: if isSignedIn();
+      allow delete: if isSignedIn();
     }
   }
 }

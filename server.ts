@@ -6,11 +6,15 @@ import fs from "fs";
 import * as pdfParseModule from "pdf-parse";
 const pdfParse = (pdfParseModule as any).default || pdfParseModule;
 import mammoth from "mammoth";
-import readXlsxFile from "read-excel-file/node";
+import WordExtractor from "word-extractor";
+import * as XLSX from "xlsx";
 import { parse as parseCsv } from "csv-parse/sync";
 import { GoogleGenAI } from "@google/genai";
 
-const upload = multer({ dest: "uploads/" });
+const upload = multer({ 
+  dest: "uploads/",
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
+});
 
 async function startServer() {
   const app = express();
@@ -41,7 +45,7 @@ async function startServer() {
       if ([".pdf", ".jpg", ".jpeg", ".png", ".webp"].includes(extension)) {
         try {
           if (!process.env.GEMINI_API_KEY) {
-            throw new Error("GEMINI_API_KEY is not set for OCR processing");
+            throw new Error("GEMINI_API_KEY is not set. Please configure it in Settings.");
           }
           const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
           const base64Data = fs.readFileSync(filePath).toString("base64");
@@ -52,7 +56,7 @@ async function startServer() {
           else if (extension === ".webp") mimeType = "image/webp";
 
           const response = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
+            model: "gemini-1.5-flash",
             contents: [
               {
                 inlineData: {
@@ -68,8 +72,9 @@ async function startServer() {
           console.error("Gemini OCR failed, falling back to basic extraction:", ocrError);
           // Fallback to pdf-parse if applicable
           if (extension === ".pdf") {
-            const dataBuffer = fs.readFileSync(filePath);
-            const parser = new pdfParse.PDFParse({ data: dataBuffer });
+            const dataBuffer = new Uint8Array(fs.readFileSync(filePath));
+            const parser = new (pdfParseModule as any).PDFParse(dataBuffer);
+            await parser.load();
             const data = await parser.getText();
             extractedText = data.text;
           } else {
@@ -79,16 +84,20 @@ async function startServer() {
       } else if (extension === ".docx") {
         const result = await mammoth.extractRawText({ path: filePath });
         extractedText = result.value;
-      } else if (extension === ".xlsx") {
-        const rows = await readXlsxFile(filePath);
-        extractedText += "\n--- Sheet: Sheet1 ---\n";
-        rows.forEach((row) => {
-          const cells = row.map((value: unknown) => {
-            if (value === null || value === undefined) return "";
-            const text = String(value).replace(/"/g, '""');
-            return /[",\n]/.test(text) ? `"${text}"` : text;
-          });
-          extractedText += cells.join(",") + "\n";
+      } else if (extension === ".doc") {
+        const extractor = new WordExtractor();
+        const extracted = await extractor.extract(filePath);
+        extractedText = extracted.getBody();
+      } else if (extension === ".xlsx" || extension === ".xls") {
+        const fileData = fs.readFileSync(filePath);
+        // @ts-ignore
+        const xlsxModule = XLSX.default || XLSX;
+        const workbook = xlsxModule.read(fileData, { type: "buffer" });
+        const sheetNames = workbook.SheetNames;
+        sheetNames.forEach((sheetName: string) => {
+          const sheet = workbook.Sheets[sheetName];
+          extractedText += `\n--- Sheet: ${sheetName} ---\n`;
+          extractedText += xlsxModule.utils.sheet_to_csv(sheet);
         });
       } else if (extension === ".csv") {
         const csvRaw = fs.readFileSync(filePath, "utf-8");
@@ -103,10 +112,6 @@ async function startServer() {
               .join(",")
           )
           .join("\n");
-      } else if (extension === ".xls") {
-        return res.status(400).json({
-          error: "Legacy .xls files are not supported. Please convert to .xlsx or .csv and upload again.",
-        });
       } else {
         // Fallback or text-based files
          extractedText = fs.readFileSync(filePath, "utf-8");
@@ -124,9 +129,9 @@ async function startServer() {
       }
 
       res.json({ text: extractedText, name: originalName });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Extraction error:", error);
-      res.status(500).json({ error: "Failed to extract text from file" });
+      res.status(500).json({ error: "Failed to extract text from file", details: error?.message || String(error) });
     }
   });
 

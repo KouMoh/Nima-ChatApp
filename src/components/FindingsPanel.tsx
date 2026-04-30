@@ -13,62 +13,63 @@ export const FindingsPanel: React.FC<FindingsPanelProps> = ({ findings, isOpen, 
     <AnimatePresence>
       {isOpen && (
         <motion.aside
-          initial={{ x: 400, opacity: 0 }}
-          animate={{ x: 0, opacity: 1, width: 400 }}
-          exit={{ x: 400, opacity: 0 }}
-          className="fixed inset-y-0 right-0 lg:relative border-l border-[#27272a] bg-[#0a0a0a] flex flex-col overflow-hidden z-40 transition-all duration-300"
+          initial={{ x: '100%', opacity: 0 }}
+          animate={{ x: 0, opacity: 1 }}
+          exit={{ x: '100%', opacity: 0 }}
+          transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+          className="fixed inset-y-0 right-0 lg:relative w-full sm:w-[400px] border-l border-white/5 bg-black/50 lg:bg-black/20 backdrop-blur-3xl flex flex-col overflow-hidden z-40 shadow-[-20px_0_50px_-20px_rgba(0,0,0,0.5)]"
         >
-          <div className="p-6 flex flex-col gap-6 h-full">
+          <div className="p-8 flex flex-col gap-8 h-full">
             <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold uppercase tracking-tight flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-[#3b82f6]" />
+              <h2 className="text-2xl font-black uppercase tracking-[-2px] flex items-center gap-3 italic">
+                <Sparkles className="w-6 h-6 text-indigo-500" />
                 Case Binder
               </h2>
               <button 
                 onClick={onClose} 
-                className="text-zinc-500 hover:text-white p-2 hover:bg-zinc-800 rounded-lg transition-colors"
+                className="text-zinc-600 hover:text-white p-3 hover:bg-white/5 rounded-2xl transition-all"
                 id="close-findings"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-8">
-              <section className="space-y-4">
+            <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-10">
+              <section className="space-y-6">
                 <div className="flex items-center justify-between">
-                  <p className="text-zinc-400 text-xs font-bold uppercase tracking-widest">Legal Insights & Findings</p>
-                  <span className="text-[10px] bg-[#3b82f6]/10 text-[#3b82f6] px-2 py-0.5 rounded-full border border-[#3b82f6]/20 font-bold uppercase">AI Synthesized</span>
+                  <p className="text-zinc-700 text-[10px] font-black uppercase tracking-[4px]">Inference Stream</p>
+                  <span className="text-[9px] bg-indigo-500/10 text-indigo-500 px-3 py-1 rounded-full border border-indigo-500/20 font-black uppercase tracking-widest shadow-inner">AI Synthesized</span>
                 </div>
                 
                 {findings ? (
-                   <div className="bg-[#18181b] border border-[#27272a] p-4 rounded-xl text-zinc-300 leading-relaxed whitespace-pre-wrap font-serif italic shadow-inner text-sm">
+                   <div className="bg-white/[0.03] border border-white/5 p-6 rounded-[28px] text-zinc-100 leading-relaxed whitespace-pre-wrap font-serif italic shadow-2xl text-base tracking-tight border-glow">
                       {findings}
                    </div>
                 ) : (
-                  <div className="text-center py-16 border border-dashed border-zinc-800 rounded-2xl flex flex-col items-center gap-4">
-                    <MessageSquare className="w-10 h-10 text-zinc-800" />
-                    <p className="text-zinc-600 text-xs italic max-w-[180px]">Continue the discussion to generate relevant legal findings and summaries.</p>
+                  <div className="text-center py-24 border border-dashed border-white/5 rounded-[40px] flex flex-col items-center gap-6 group">
+                    <MessageSquare className="w-12 h-12 text-zinc-800 group-hover:text-indigo-900 transition-colors" />
+                    <p className="text-zinc-600 text-xs italic font-medium max-w-[200px] leading-relaxed">System awaiting cognitive input to hypothesize legal findings.</p>
                   </div>
                 )}
               </section>
 
-              <section className="space-y-4">
-                <p className="text-zinc-400 text-xs font-bold uppercase tracking-widest">Case Documents</p>
-                <div className="space-y-2">
-                  <div className="bg-zinc-900/50 border border-zinc-800 p-4 rounded-xl flex items-center justify-center text-zinc-600 italic text-xs">
-                    No documents attached to this case node.
+              <section className="space-y-6">
+                <p className="text-zinc-700 text-[10px] font-black uppercase tracking-[4px]">Forensic Archives</p>
+                <div className="space-y-3">
+                  <div className="bg-white/[0.02] border border-white/5 p-6 rounded-[28px] flex items-center justify-center text-zinc-700 italic text-[10px] font-medium tracking-tight">
+                    Repository empty. No artifacts uploaded.
                   </div>
                 </div>
               </section>
             </div>
 
-            <div className="pt-6 border-t border-zinc-800 mt-auto">
+            <div className="pt-8 border-t border-white/5 mt-auto">
               <button 
-                className="w-full flex items-center justify-center gap-2 py-4 bg-[#3b82f6] hover:bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-500/20"
+                className="w-full flex items-center justify-center gap-4 py-5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-[24px] text-[10px] font-black uppercase tracking-[4px] transition-all shadow-xl shadow-indigo-600/20 active:scale-95 group"
                 id="export-findings"
               >
-                <Download className="w-4 h-4" />
-                Export Case Summary
+                <Download className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
+                Export Forensic Brief
               </button>
             </div>
           </div>

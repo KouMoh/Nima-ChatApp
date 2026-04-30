@@ -118,6 +118,10 @@ export function useGeminiLive(options?: { onTurnComplete?: (text: string) => voi
       setError(null);
       setAiTranscription(""); // Reset transcript on start
       
+      if (!process.env.GEMINI_API_KEY) {
+        throw new Error("Missing API key. Please configure a valid API key in AI Studio -> Settings -> API Keys.");
+      }
+
       // Initialize Audio Context
       if (!audioContextRef.current) {
         audioContextRef.current = new AudioContext({ sampleRate: 16000 });
@@ -353,5 +357,16 @@ export function useGeminiLive(options?: { onTurnComplete?: (text: string) => voi
     };
   }, [stop]);
 
-  return { start, stop, isActive, error, transcription, aiTranscription, volume, setVolume, requestedFileId, provideFileToAi };
+  const sendToAi = useCallback((content: string) => {
+    if (!sessionRef.current) return;
+    sessionRef.current.sendClientContent({
+      turns: [{
+        role: "user",
+        parts: [{text: content}]
+      }],
+      turnComplete: true
+    });
+  }, []);
+
+  return { start, stop, isActive, error, transcription, aiTranscription, volume, setVolume, requestedFileId, provideFileToAi, sendToAi };
 }
