@@ -921,6 +921,11 @@ export default function ChatRoom() {
                    ))}
                 </div>
               </div>
+              <div className="mt-auto pt-4 border-t border-zinc-800 text-center">
+                 <div className="flex justify-center items-center gap-2 text-xs text-zinc-500">
+                    <span>Powered by Indian Kanoon</span>
+                 </div>
+              </div>
             </div>
           </motion.aside>
         )}
