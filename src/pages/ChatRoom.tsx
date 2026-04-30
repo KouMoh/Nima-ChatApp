@@ -42,6 +42,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import { ai } from '../lib/gemini';
+import { FindingsPanel } from '../components/FindingsPanel';
 
 // Message Interface
 interface Message {
@@ -56,12 +57,13 @@ const personas = {
   Friend: "You are NimmLy, chatting with your close friend. Use highly casual, conversational language, heavy local colloquial words, and relaxed pronunciation (e.g., 'gonna', 'wanna'). The tone is extremely laid-back, like relaxing at a party, but DO NOT say you are at a party. Pay close attention to the user's mood and adapt your own mood and energy to match theirs naturally—don't default to being overly excited all the time. Speak entirely informally as if two friends are hanging out. If speaking or understanding Odia, strictly use extremely local colloquialisms and strictly use the informal pronoun 'tu'. CRITICAL INSTRUCTION: Be highly proactive and talkative. Do not give short or silent answers. Elaborate fully on the subject. If explaining a process, recipe, or telling a story, provide the complete details without cutting yourself off, no matter how long it takes. Do not artificially limit your response length or stop speaking abruptly. Once you have completely finished sharing your thoughts, naturally ask an engaging question to keep the conversation flowing. If you finish speaking and the user does not respond within a few seconds, proactively speak up again to wake them up. You should gently poke fun at them, playfully ask if they are ignoring you, or give a very soft, friendly warning that you'll leave the conversation if they don't answer—just like real friends do. If the user interrupts you, stop and listen immediately.",
   Assistant: "You are NimmLy, a professional and efficient personal assistant. Be concise, polite, and directly address the user's needs in a clear voice.",
   Teacher: "You are NimmLy, an encouraging and insightful teacher. Explain things clearly, ask guiding questions, and use an educational but approachable tone.",
-  Parent: "You are NimmLy, a caring and protective parent figure. Use warm, comforting, and nurturing language, offering gentle advice and support."
+  Parent: "You are NimmLy, a caring and protective parent figure. Use warm, comforting, and nurturing language, offering gentle advice and support.",
+  'Le _ Discuss': "You are a senior Legal Advocate and a complete expert legal advisor. Provide all types of data and discuss all contexts of the case which the user describes. Study the case with the immense expertise of the latest GEMINI AI. Give suggestions, search all angles, analyze, perform discovery, and exchange ideas on all findings in context to the case by uncovering all potential forensic points. Help the user in all manners so they can win the case. Perform Source Citation and Analytical Inquiry to provide all previous relevant verdicts. Discuss every relevant verdict in detail and/or with a synopsis. Employ Metaphorical Usage and deeply discuss and argue whether the verdicts are relevant or not, ensuring that the exact, relevant, and most useful verdicts are found."
 };
 type PersonaType = keyof typeof personas;
 
 const voices = {
-  Aoede: 'Aoede (Female)',
+  Zephyr: 'Zephyr (Female)',
   Kore: 'Kore (Female)',
   Puck: 'Puck (Male)',
   Charon: 'Charon (Male)',
@@ -79,14 +81,138 @@ export default function ChatRoom() {
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isCallActive, setIsCallActive] = useState(false);
-  const [selectedPersona, setSelectedPersona] = useState<PersonaType>('Friend');
-  const [selectedVoice, setSelectedVoice] = useState<VoiceType>('Aoede');
+  const [selectedPersona, setSelectedPersona] = useState<PersonaType>('Le _ Discuss');
+  const [selectedVoice, setSelectedVoice] = useState<VoiceType>('Zephyr');
   const scrollRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   
   const [chatSessions, setChatSessions] = useState<any[]>([]);
+  const [findings, setFindings] = useState<string>("");
+  const [isFindingsExpanded, setIsFindingsExpanded] = useState(false);
   
-  const { start: startLive, stop: stopLive, isActive: isLiveActive, aiTranscription, volume, setVolume } = useGeminiLive();
+  const activeChatRef = useRef(activeChat);
+  const chatSessionsRef = useRef(chatSessions);
+  const messagesRef = useRef(messages);
+  
+  useEffect(() => {
+    activeChatRef.current = activeChat;
+  }, [activeChat]);
+
+  useEffect(() => {
+    chatSessionsRef.current = chatSessions;
+  }, [chatSessions]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const updateFindings = async (chatId: string, currentMessages: Message[]) => {
+    if (currentMessages.length === 0) return;
+    
+    try {
+      const history = currentMessages.slice(-20).map(m => `${m.senderId === 'ai' ? 'AI' : 'User'}: ${m.content}`).join('\n');
+      const response = await ai.models.generateContent({
+        model: "gemini-1.5-flash",
+        config: {
+          systemInstruction: "You are a professional legal clerk. Analyze the provided conversation and extract only the relevant case facts, legal points, discovered verdicts, and action items. Format them as a clean, bulleted Case Summary. Ignore small talk. Be concise and professional. If information is already present, update and refine the summary."
+        },
+        contents: [{ role: 'user', parts: [{ text: `Conversation History:\n${history}\n\nProvide the latest relevant findings summary.` }] }]
+      });
+      
+      const distilled = (response as any).candidates?.[0]?.content?.parts?.[0]?.text || "";
+      if (distilled) {
+        await setDoc(doc(db, 'chats', chatId), {
+          findings: distilled,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+        setFindings(distilled);
+      }
+    } catch (err) {
+      console.error("Findings synthesis failed:", err);
+    }
+  };
+
+  const { start: startLive, stop: stopLive, isActive: isLiveActive, aiTranscription, transcription: userTranscription, volume, setVolume, requestedFileId, provideFileToAi } = useGeminiLive({
+    onTurnComplete: async (text) => {
+      const chatId = activeChatRef.current;
+      if (text.trim() && chatId) {
+        try {
+          await addDoc(collection(db, 'chats', chatId, 'messages'), {
+            chatId: chatId,
+            senderId: 'ai',
+            content: text,
+            type: 'audio',
+            createdAt: serverTimestamp()
+          });
+
+          // Generate title if needed
+          const currentTitle = chatSessionsRef.current?.find(c => c.id === chatId)?.title;
+          let newTitle = currentTitle;
+          if (!newTitle || newTitle === 'New Chat' || newTitle === 'Welcome Chat' || newTitle === 'Voice Session') {
+            try {
+              const titleResponse = await ai.models.generateContent({
+                model: "gemini-1.5-flash",
+                contents: [{ role: 'user', parts: [{ text: `Generate a short, concise topic title (max 5 words) for a conversation that includes this message. Return ONLY the title text, no quotes, no prefixes: "${text.substring(0, 100)}"` }] }]
+              });
+              newTitle = (titleResponse as any).candidates?.[0]?.content?.parts?.[0]?.text?.trim() || text.split(' ').slice(0, 4).join(' ') + '...';
+              newTitle = newTitle.replace(/^"|"$/g, '').trim();
+            } catch (err) {
+              newTitle = text.split(' ').slice(0, 4).join(' ') + '...';
+            }
+          }
+
+          await setDoc(doc(db, 'chats', chatId), {
+            title: newTitle || currentTitle || "Voice Session",
+            lastMessage: text.substring(0, 50) + "...",
+            updatedAt: serverTimestamp()
+          }, { merge: true });
+
+          updateFindings(chatId, [...messagesRef.current, { id: 'temp', content: text, senderId: 'ai', type: 'audio', createdAt: new Date() }]);
+        } catch (err) {
+          console.error("Failed to save transcript turn", err);
+        }
+      }
+    },
+    onUserTurnComplete: async (text) => {
+      const chatId = activeChatRef.current;
+      if (text.trim() && chatId && user) {
+        try {
+          await addDoc(collection(db, 'chats', chatId, 'messages'), {
+            chatId: chatId,
+            senderId: user.uid,
+            content: text,
+            type: 'audio',
+            createdAt: serverTimestamp()
+          });
+          
+          const currentTitle = chatSessionsRef.current?.find(c => c.id === chatId)?.title;
+          let newTitle = currentTitle;
+          if (!newTitle || newTitle === 'New Chat' || newTitle === 'Welcome Chat' || newTitle === 'Voice Session') {
+            try {
+              const titleResponse = await ai.models.generateContent({
+                model: "gemini-1.5-flash",
+                contents: [{ role: 'user', parts: [{ text: `Generate a short, concise topic title (max 5 words) for a conversation that includes this user message. Return ONLY the title text, no quotes, no prefixes: "${text.substring(0, 100)}"` }] }]
+              });
+              newTitle = (titleResponse as any).candidates?.[0]?.content?.parts?.[0]?.text?.trim() || text.split(' ').slice(0, 4).join(' ') + '...';
+              newTitle = newTitle.replace(/^"|"$/g, '').trim();
+            } catch (err) {
+              newTitle = text.split(' ').slice(0, 4).join(' ') + '...';
+            }
+          }
+
+          await setDoc(doc(db, 'chats', chatId), {
+            title: newTitle || currentTitle || "Voice Session",
+            lastMessage: text.substring(0, 50) + "...",
+            updatedAt: serverTimestamp()
+          }, { merge: true });
+
+          updateFindings(chatId, [...messagesRef.current, { id: 'temp', content: text, senderId: user.uid, type: 'audio', createdAt: new Date() }]);
+        } catch (err) {
+          console.error("Failed to save user transcript turn", err);
+        }
+      }
+    }
+  });
 
   // Load chat sessions
   useEffect(() => {
@@ -95,15 +221,18 @@ export default function ChatRoom() {
       collection(db, 'chats'), 
       where('participants', 'array-contains', user.uid)
     ), (snapshot) => {
-      // Generate sessions
       const sessions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      
       sessions.sort((a: any, b: any) => {
         const tA = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : 0;
         const tB = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : 0;
         return tB - tA;
       });
       setChatSessions(sessions);
+      
+      if (activeChatRef.current) {
+        const current = sessions.find(s => s.id === activeChatRef.current);
+        if (current) setFindings(current.findings || "");
+      }
     }, (error) => {
       console.error("Chat list error:", error);
     });
@@ -155,10 +284,13 @@ export default function ChatRoom() {
     initialize();
   }, [user]);
 
-  // Load messages
   useEffect(() => {
-    if (!activeChat) return;
+    if (!activeChat) {
+      setMessages([]);
+      return;
+    }
 
+    setMessages([]); // Clear immediately to prevent cross-chat bleed
     const q = query(
       collection(db, 'chats', activeChat, 'messages'),
       orderBy('createdAt', 'asc'),
@@ -250,20 +382,20 @@ export default function ChatRoom() {
       if (!isLiveActive) {
         let aiResponse = "I'm sorry, I couldn't process that.";
         try {
-          const response = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
+          const result = await ai.models.generateContent({
+            model: "gemini-1.5-flash",
+            config: {
+              systemInstruction: personas[selectedPersona]
+            },
             contents: [
               ...messages.slice(-10).map(m => ({
                 role: m.senderId === 'ai' ? 'model' : 'user',
                 parts: [{ text: m.content }]
               })),
               { role: 'user', parts: [{ text }] }
-            ],
-            config: {
-              systemInstruction: personas[selectedPersona]
-            }
+            ]
           });
-          aiResponse = response.text || aiResponse;
+          aiResponse = (result as any).candidates?.[0]?.content?.parts?.[0]?.text || aiResponse;
         } catch (err) {
           console.error("AI response generation failed", err);
         }
@@ -286,6 +418,9 @@ export default function ChatRoom() {
             lastMessage: aiResponse,
             updatedAt: serverTimestamp()
           }, { merge: true });
+
+          // Distill findings after AI response
+          updateFindings(activeChat, [...messages, { id: 'temp-user', content: text, senderId: user?.uid as string, type: 'text', createdAt: new Date() }, { id: 'temp-ai', content: aiResponse, senderId: 'ai', type: 'text', createdAt: new Date() }]);
         } catch (err) {
           console.error("Chat metadata update after AI failed", err);
           throw err;
@@ -296,13 +431,56 @@ export default function ChatRoom() {
     }
   };
 
-  const toggleCall = () => {
+  const toggleCall = async () => {
     setActiveView('home');
     if (isLiveActive) {
+      if (aiTranscription.trim() && activeChat) {
+        try {
+          await addDoc(collection(db, 'chats', activeChat, 'messages'), {
+            chatId: activeChat,
+            senderId: 'ai',
+            content: aiTranscription,
+            type: 'audio',
+            createdAt: serverTimestamp()
+          });
+        } catch (err) {}
+      }
+      
+      if (userTranscription?.trim() && activeChat && user) {
+        try {
+          await addDoc(collection(db, 'chats', activeChat, 'messages'), {
+            chatId: activeChat,
+            senderId: user.uid,
+            content: userTranscription,
+            type: 'audio',
+            createdAt: serverTimestamp()
+          });
+        } catch (err) {}
+      }
+
       stopLive();
       setIsCallActive(false);
     } else {
-      startLive(personas[selectedPersona], selectedVoice);
+      let currentActiveChat = activeChat;
+      if (!currentActiveChat) {
+        if (!user) return;
+        const newChatId = doc(collection(db, 'chats')).id;
+        await setDoc(doc(db, 'chats', newChatId), {
+          id: newChatId,
+          participants: [user.uid],
+          type: 'ai',
+          updatedAt: serverTimestamp(),
+          title: 'Voice Session'
+        });
+        setActiveChat(newChatId);
+        currentActiveChat = newChatId;
+      }
+      
+      let historyContext = "";
+      if (messages.length > 0) {
+         historyContext = messages.map(m => `[${m.senderId === 'ai' ? 'NimmLy' : 'User'}]: ${m.content}`).join('\n\n');
+      }
+      startLive(personas[selectedPersona], selectedVoice, historyContext);
       setIsCallActive(true);
     }
   };
@@ -434,13 +612,41 @@ export default function ChatRoom() {
                <span className="text-[10px] text-zinc-500 mr-2 font-bold uppercase hidden md:inline">Persona</span>
                <select 
                  value={selectedPersona}
-                 onChange={(e) => {
-                   setSelectedPersona(e.target.value as PersonaType);
+                 onChange={async (e) => {
+                   const newPersona = e.target.value as PersonaType;
+                   setSelectedPersona(newPersona);
                    if (isLiveActive) {
+                     if (aiTranscription.trim() && activeChat) {
+                       try {
+                         await addDoc(collection(db, 'chats', activeChat, 'messages'), {
+                           chatId: activeChat,
+                           senderId: 'ai',
+                           content: aiTranscription,
+                           type: 'audio',
+                           createdAt: serverTimestamp()
+                         });
+                       } catch (err) {}
+                     }
+                     if (userTranscription?.trim() && activeChat && user) {
+                       try {
+                         await addDoc(collection(db, 'chats', activeChat, 'messages'), {
+                           chatId: activeChat,
+                           senderId: user.uid,
+                           content: userTranscription,
+                           type: 'audio',
+                           createdAt: serverTimestamp()
+                         });
+                       } catch (err) {}
+                     }
                      stopLive();
                      setIsCallActive(false);
+                     
+                     let historyContext = "";
+                     if (messages.length > 0) {
+                        historyContext = messages.map(m => `[${m.senderId === 'ai' ? 'NimmLy' : 'User'}]: ${m.content}`).join('\n\n');
+                     }
                      setTimeout(() => {
-                       startLive(personas[e.target.value as PersonaType], selectedVoice);
+                       startLive(personas[newPersona], selectedVoice, historyContext);
                        setIsCallActive(true);
                      }, 500);
                    }
@@ -458,13 +664,41 @@ export default function ChatRoom() {
                <span className="text-[10px] text-zinc-500 mr-2 font-bold uppercase hidden md:inline">Voice</span>
                <select 
                  value={selectedVoice}
-                 onChange={(e) => {
-                   setSelectedVoice(e.target.value as VoiceType);
+                 onChange={async (e) => {
+                   const newVoice = e.target.value as VoiceType;
+                   setSelectedVoice(newVoice);
                    if (isLiveActive) {
+                     if (aiTranscription.trim() && activeChat) {
+                       try {
+                         await addDoc(collection(db, 'chats', activeChat, 'messages'), {
+                           chatId: activeChat,
+                           senderId: 'ai',
+                           content: aiTranscription,
+                           type: 'audio',
+                           createdAt: serverTimestamp()
+                         });
+                       } catch (err) {}
+                     }
+                     if (userTranscription?.trim() && activeChat && user) {
+                       try {
+                         await addDoc(collection(db, 'chats', activeChat, 'messages'), {
+                           chatId: activeChat,
+                           senderId: user.uid,
+                           content: userTranscription,
+                           type: 'audio',
+                           createdAt: serverTimestamp()
+                         });
+                       } catch (err) {}
+                     }
                      stopLive();
                      setIsCallActive(false);
+                     
+                     let historyContext = "";
+                     if (messages.length > 0) {
+                        historyContext = messages.map(m => `[${m.senderId === 'ai' ? 'NimmLy' : 'User'}]: ${m.content}`).join('\n\n');
+                     }
                      setTimeout(() => {
-                       startLive(personas[selectedPersona], e.target.value as VoiceType);
+                       startLive(personas[selectedPersona], newVoice, historyContext);
                        setIsCallActive(true);
                      }, 500);
                    }
@@ -480,6 +714,21 @@ export default function ChatRoom() {
            </div>
 
            <div className="flex flex-wrap items-center justify-end gap-2 pointer-events-auto">
+            {activeChat && (
+              <button 
+                onClick={() => setIsFindingsExpanded(!isFindingsExpanded)}
+                className={cn(
+                  "flex items-center gap-2 px-3 md:px-4 h-10 md:h-12 rounded-xl md:rounded-2xl transition-all text-[10px] md:text-xs font-black uppercase tracking-widest border shadow-lg",
+                  isFindingsExpanded 
+                    ? "bg-[#3b82f6] text-white border-[#3b82f6] shadow-[#3b82f6]/20" 
+                    : "bg-[#18181b] text-zinc-400 hover:text-white border-[#27272a]"
+                )}
+                id="findings-toggle"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span className="hidden sm:inline">Findings</span>
+              </button>
+            )}
               {activeView === 'text' && (
                 <button 
                   onClick={() => setActiveView('home')}
@@ -528,105 +777,91 @@ export default function ChatRoom() {
            </div>
         </header>
 
-        {/* Dynamic Viewport (Bold Typography Theme) */}
-        <div className="flex-1 flex flex-col justify-center items-center px-6 md:px-8 text-center gap-4 md:gap-6 relative overflow-hidden w-full pt-20">
-          <AnimatePresence mode="wait">
-            {!isCallActive ? (
-              activeView === 'home' ? (
-                <motion.div 
-                  key="idle"
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -20 }}
-                  className="space-y-4 md:space-y-6"
-                >
-                  <h1 className="text-4xl sm:text-6xl md:text-[84px] font-black leading-tight sm:leading-[0.9] tracking-tight sm:tracking-[-4px] max-w-2xl uppercase">
-                    Ready to assist, {user?.displayName?.split(' ')[0]}.
-                  </h1>
-                  <p className="text-zinc-500 text-base md:text-xl font-medium max-w-lg mx-auto">
-                    I'm processing your current context. Start a live session or open text chat to begin.
-                  </p>
-                </motion.div>
-              ) : (
-                <motion.div
-                  key="chat"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="absolute inset-0 w-full flex flex-col pt-24 pb-20 md:pb-32 px-4 md:px-8"
-                >
-                  <div className="flex-1 w-full max-w-4xl mx-auto flex flex-col gap-4 overflow-hidden relative border border-zinc-800 rounded-2xl bg-[#0a0a0a]">
-                    
-                    {/* Top Half: AI Messages */}
-                    <div className="flex-1 overflow-y-auto flex flex-col p-4 md:p-6 custom-scrollbar relative">
-                      {messages.filter(m => m.senderId === 'ai').length === 0 ? (
-                        <div className="text-zinc-500 text-center italic mt-auto mb-auto font-medium">AI responses will appear here.</div>
-                      ) : (
-                        <div className="flex flex-col gap-2 md:gap-3 mt-auto">
-                          {messages.filter(m => m.senderId === 'ai').map((m) => (
-                            <motion.div 
-                              key={m.id}
-                              initial={{ opacity: 0, y: 10 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              className="px-3 py-1 md:px-4 md:py-1 rounded-[12px] md:rounded-[14px] text-[14px] md:text-[15px] leading-tight max-w-[85%] md:max-w-[75%] shadow-sm text-left w-fit bg-[#18181b] border border-[#27272a] self-start text-zinc-300 rounded-tl-sm"
-                            >
-                              {m.content}
-                            </motion.div>
-                          ))}
-                          <div ref={scrollRef} className="h-2 shrink-0" />
-                        </div>
-                      )}
-                    </div>
+        {/* Unified Discovery Workspace (Bold Typography Theme) */}
+        <div className="flex-1 flex flex-col relative overflow-hidden w-full pt-28 pb-32">
+          {activeChat ? (
+            <div className="flex-1 flex flex-col w-full max-w-5xl mx-auto px-4 md:px-8 gap-6 overflow-hidden">
+               {/* Live Session Status */}
+               <AnimatePresence>
+                  {isLiveActive && (
+                    <motion.div 
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      className="shrink-0 bg-[#3b82f6]/5 border border-[#3b82f6]/20 rounded-2xl p-4 flex items-center gap-4 mb-4"
+                    >
+                      <div className="w-10 h-10 rounded-full bg-black border-2 border-[#3b82f6] flex items-center justify-center relative overflow-hidden">
+                         <div className="absolute inset-0 bg-[#3b82f6]/20 animate-pulse" />
+                         <Sparkles className="w-5 h-5 text-[#3b82f6] relative z-10" />
+                      </div>
+                      <div className="flex-1 overflow-hidden">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-[#3b82f6] mb-1">Live Discovery Active</p>
+                        <p className="text-sm font-serif italic text-zinc-300 truncate">
+                          {aiTranscription ? `"${aiTranscription}"` : "Extracting context from conversation..."}
+                        </p>
+                      </div>
+                    </motion.div>
+                  )}
+               </AnimatePresence>
 
-                    <div className="w-full h-px bg-[#27272a] shrink-0" />
-
-                    {/* Bottom Half: User Messages */}
-                    <div className="flex-1 overflow-y-auto flex flex-col gap-2 md:gap-3 p-4 md:p-6 custom-scrollbar">
-                      {messages.filter(m => m.senderId === user?.uid).length === 0 ? (
-                        <div className="text-zinc-500 text-center italic mt-auto mb-auto font-medium">Your messages will appear here.</div>
-                      ) : (
-                        [...messages].filter(m => m.senderId === user?.uid).reverse().map((m) => (
-                          <motion.div 
-                            key={m.id}
-                            initial={{ opacity: 0, y: -10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            className="px-3 py-1 md:px-4 md:py-1 rounded-[12px] md:rounded-[14px] text-[14px] md:text-[15px] leading-tight max-w-[85%] md:max-w-[75%] shadow-sm text-left w-fit bg-[#3b82f6] text-white self-end font-medium rounded-br-sm"
-                          >
-                            {m.content}
-                          </motion.div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </motion.div>
-              )
-            ) : (
-              <motion.div 
-                key="active"
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="space-y-8 md:space-y-12"
-              >
-                <div className="relative group">
-                   <motion.div 
-                     animate={{ scale: [1, 1.1, 1], opacity: [0.5, 0.8, 0.5] }}
-                     transition={{ repeat: Infinity, duration: 2 }}
-                     className="absolute inset-0 bg-[#3b82f6]/20 rounded-full blur-[40px] md:blur-[80px]"
-                   />
-                   <div className="relative w-32 h-32 md:w-48 md:h-48 rounded-full border-2 md:border-4 border-[#3b82f6] flex items-center justify-center bg-[#050505]">
-                      <Sparkles className="w-12 h-12 md:w-20 md:h-20 text-[#3b82f6]" />
+               {/* Chronological Message Stream */}
+               <div className="flex-1 overflow-y-auto flex flex-col gap-6 custom-scrollbar pr-4 pb-12">
+                 {messages.length === 0 ? (
+                   <div className="flex-1 flex flex-col items-center justify-center text-center space-y-6 py-20 opacity-20">
+                      <h1 className="text-6xl md:text-9xl font-black uppercase tracking-tighter text-white">Discovery</h1>
+                      <p className="text-sm md:text-xl font-medium max-w-sm text-zinc-500">Commence the case analysis by typed input or starting a voice discovery session.</p>
                    </div>
-                </div>
-                <div className="space-y-3 md:space-y-4">
-                  <h2 className="text-2xl md:text-4xl font-black uppercase tracking-tight text-[#3b82f6]">NimmLy Live</h2>
-                  <p className="text-lg md:text-xl font-serif italic text-zinc-300 max-w-sm md:max-w-md mx-auto px-4">
-                    {aiTranscription ? `"${aiTranscription}"` : "Waiting for voice input..."}
-                  </p>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+                 ) : (
+                    <div className="flex flex-col gap-4">
+                      {messages.map((m) => (
+                        <motion.div 
+                          key={m.id}
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className={cn(
+                            "flex flex-col gap-1 max-w-[85%] md:max-w-[70%]",
+                            m.senderId === 'ai' ? "self-start items-start" : "self-end items-end text-right"
+                          )}
+                        >
+                          <div className={cn(
+                            "px-4 py-3 rounded-2xl text-[14px] md:text-[15px] leading-relaxed shadow-xl",
+                            m.senderId === 'ai' 
+                              ? "bg-[#18181b] border border-[#27272a] text-zinc-300 rounded-tl-sm" 
+                              : "bg-[#3b82f6] text-white rounded-br-sm font-medium"
+                          )}>
+                            {m.content}
+                          </div>
+                          {m.type === 'audio' && (
+                            <span className="text-[9px] font-black uppercase tracking-widest text-zinc-600 flex items-center gap-1 mt-1">
+                               <Mic className="w-2.5 h-2.5" /> Discovered via Voice
+                            </span>
+                          )}
+                        </motion.div>
+                      ))}
+                      <div ref={scrollRef} className="h-4" />
+                    </div>
+                 )}
+               </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-center space-y-8">
+              <h1 className="text-5xl md:text-8xl font-black uppercase tracking-tighter">Select a <span className="text-[#3b82f6]">Case</span></h1>
+              <p className="text-zinc-500 text-lg md:text-xl font-medium max-w-lg mx-auto">Open a previous file or start a new discovery session to begin synthesizing legal findings.</p>
+              <button 
+                onClick={startNewChat}
+                className="px-8 py-4 bg-white text-black hover:bg-zinc-200 rounded-2xl font-black uppercase tracking-widest text-sm transition-all shadow-2xl"
+              >
+                New Discovery Node
+              </button>
+            </div>
+          )}
         </div>
+
+        <FindingsPanel 
+          findings={findings} 
+          isOpen={isFindingsExpanded} 
+          onClose={() => setIsFindingsExpanded(false)} 
+        />
 
         {/* Video Overlay (Floating) */}
         <AnimatePresence>
@@ -645,6 +880,74 @@ export default function ChatRoom() {
           )}
         </AnimatePresence>
 
+        {/* File Upload Overlay */}
+        <AnimatePresence>
+          {requestedFileId && (
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="absolute inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            >
+              <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-6 md:p-8 max-w-md w-full shadow-2xl space-y-6 text-center">
+                <div className="w-16 h-16 bg-[#3b82f6]/10 rounded-full flex items-center justify-center mx-auto">
+                  <span className="text-2xl text-[#3b82f6]">📄</span>
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-white mb-2">Upload Required</h3>
+                  <p className="text-sm text-zinc-400">Gemini needs you to upload a file to continue the discussion.</p>
+                </div>
+                <div className="flex flex-col gap-3">
+                  <label className="bg-[#3b82f6] text-white px-6 py-3 rounded-xl font-bold uppercase tracking-wider text-sm cursor-pointer hover:bg-blue-600 transition-colors">
+                    Select File
+                    <input 
+                      type="file" 
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          try {
+                            const formData = new FormData();
+                            formData.append("file", file);
+                            const res = await fetch("/api/extract", {
+                              method: "POST",
+                              body: formData,
+                            });
+                            
+                            let data;
+                            const contentType = res.headers.get("content-type");
+                            if (contentType && contentType.includes("application/json")) {
+                              data = await res.json();
+                            } else {
+                              const textResult = await res.text();
+                              console.error("Non-JSON response:", textResult.substring(0, 200));
+                              throw new Error("Server returned an invalid non-JSON response.");
+                            }
+                            
+                            if (!res.ok) throw new Error(data.error || "Extraction failed");
+                            
+                            provideFileToAi(data.text, data.name);
+                          } catch (err) {
+                            console.error(err);
+                            provideFileToAi("Error: Failed to process the file: " + (err as Error).message, file.name);
+                          }
+                        }
+                        e.target.value = ''; // Reset input to allow re-uploading same file
+                      }}
+                    />
+                  </label>
+                  <button 
+                    onClick={() => provideFileToAi("User declined to upload a file.", "none")}
+                    className="text-zinc-500 hover:text-white px-6 py-3 font-semibold uppercase tracking-wider text-xs transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Input Area */}
         <AnimatePresence>
           {activeView === 'text' && !isCallActive && (
@@ -656,9 +959,46 @@ export default function ChatRoom() {
             >
                <form 
                  onSubmit={handleSendMessage}
-                 className="max-w-3xl mx-auto flex items-center gap-2 md:gap-4 bg-[#18181b] border border-[#27272a] p-2 md:p-3 pl-4 md:pl-6 rounded-2xl md:rounded-[2rem] shadow-[0_20px_40px_rgba(0,0,0,0.8)] focus-within:border-[#3b82f6] transition-all"
+                 className="max-w-3xl mx-auto flex items-center gap-2 md:gap-4 bg-[#18181b] border border-[#27272a] p-2 md:p-3 pr-2 md:pr-3 rounded-2xl md:rounded-[2rem] shadow-[0_20px_40px_rgba(0,0,0,0.8)] focus-within:border-[#3b82f6] transition-all"
                >
-                  <div className="text-[#3b82f6] opacity-50 shrink-0">✨</div>
+                  <label className="p-2 md:p-3 text-zinc-400 hover:text-[#3b82f6] hover:bg-[#3b82f6]/10 rounded-xl cursor-pointer transition-colors shrink-0">
+                    <input 
+                      type="file" 
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          try {
+                            const formData = new FormData();
+                            formData.append("file", file);
+                            const res = await fetch("/api/extract", {
+                              method: "POST",
+                              body: formData,
+                            });
+                            
+                            let data;
+                            const contentType = res.headers.get("content-type");
+                            if (contentType && contentType.includes("application/json")) {
+                              data = await res.json();
+                            } else {
+                              const textResult = await res.text();
+                              console.error("Non-JSON response:", textResult.substring(0, 200));
+                              throw new Error("Server returned an invalid non-JSON response.");
+                            }
+
+                            if (!res.ok) throw new Error(data.error || "Extraction failed");
+                            
+                            setInputText(prev => prev + `\n[File Attached: ${data.name}]\n${data.text}\n`);
+                          } catch (err) {
+                            console.error(err);
+                            setInputText(prev => prev + `\n[Error: Failed to process file ${file.name}: ${(err as Error).message}]\n`);
+                          }
+                        }
+                        e.target.value = ''; // Reset input
+                      }}
+                    />
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                  </label>
                   <input 
                     type="text" 
                     value={inputText}

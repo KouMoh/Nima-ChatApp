@@ -2,11 +2,17 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { ai } from '../lib/gemini';
 import { Modality, LiveServerMessage, Type } from '@google/genai';
 
-export function useGeminiLive() {
+export function useGeminiLive(options?: { onTurnComplete?: (text: string) => void, onUserTurnComplete?: (text: string) => void }) {
   const [isActive, setIsActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [transcription, setTranscription] = useState("");
   const [aiTranscription, setAiTranscription] = useState("");
+  const [requestedFileId, setRequestedFileId] = useState<string | null>(null);
+  
+  const optionsRef = useRef(options);
+  useEffect(() => {
+    optionsRef.current = options;
+  }, [options]);
   
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -93,9 +99,10 @@ export function useGeminiLive() {
     setIsActive(false);
   }, []);
 
-  const start = useCallback(async (systemInstruction: string = "You are a helpful assistant.", voiceName: string = "Aoede") => {
+  const start = useCallback(async (systemInstruction: string = "You are a helpful assistant.", voiceName: string = "Zephyr", historyContext: string = "") => {
     try {
       setError(null);
+      setAiTranscription(""); // Reset transcript on start
       
       // Initialize Audio Context
       if (!audioContextRef.current) {
@@ -120,24 +127,40 @@ export function useGeminiLive() {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } },
           },
-          systemInstruction: { parts: [{ text: systemInstruction }] },
+          systemInstruction: { parts: [{ text: systemInstruction + (historyContext ? "\n\nCRITICAL CONTEXT - THE FOLLOWING IS THE CHAT HISTORY SO FAR:\n" + historyContext : "") }] },
           outputAudioTranscription: {},
           inputAudioTranscription: {},
           tools: [{
-            functionDeclarations: [{
-              name: 'set_ai_volume',
-              description: 'Sets your own audio volume. Use this whenever the user asks you to speak louder, quieter, reduce your volume, etc. The default volume is 1.0. Max is 3.0, min is 0.1.',
-              parameters: {
-                type: Type.OBJECT,
-                properties: {
-                  new_volume: {
-                    type: Type.NUMBER,
-                    description: "The requested volume level between 0.1 (very quiet) and 3.0 (very loud)."
-                  }
-                },
-                required: ["new_volume"]
+            functionDeclarations: [
+              {
+                name: 'set_ai_volume',
+                description: 'Sets your own audio volume. Use this whenever the user asks you to speak louder, quieter, reduce your volume, etc. The default volume is 1.0. Max is 3.0, min is 0.1.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    new_volume: {
+                      type: Type.NUMBER,
+                      description: "The requested volume level between 0.1 (very quiet) and 3.0 (very loud)."
+                    }
+                  },
+                  required: ["new_volume"]
+                }
+              },
+              {
+                name: 'prompt_user_for_file_upload',
+                description: 'Prompts the user to upload a file (e.g. document, text file) directly to you if you need them to attach evidence or data. Only call this when you explicitly need the user to upload a file. The system will open a file picker for them and return the text content of the file.',
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    reason: {
+                      type: Type.STRING,
+                      description: "The reason for requesting the file upload."
+                    }
+                  },
+                  required: []
+                }
               }
-            }]
+            ]
           }]
         },
         callbacks: {
@@ -147,9 +170,43 @@ export function useGeminiLive() {
             processor.connect(audioContextRef.current!.destination);
           },
           onmessage: async (message: LiveServerMessage) => {
-            // Transcription
+            // Log to console for debugging
+            if (message.serverContent && !message.serverContent.modelTurn) {
+              console.log("SERVER CONTENT NON-MODEL:", JSON.stringify(message.serverContent, null, 2));
+            }
+
+            // Input Transcription (User Speech)
+            if ((message.serverContent as any)?.inputTranscription) {
+              const inputTx = (message.serverContent as any).inputTranscription;
+              if (inputTx.text) {
+                setTranscription(prev => prev + inputTx.text);
+              }
+              if (inputTx.finished) {
+                setTranscription(prev => {
+                   if (prev.trim() && optionsRef.current?.onUserTurnComplete) {
+                     optionsRef.current.onUserTurnComplete(prev);
+                   }
+                   return "";
+                });
+              }
+            }
+
+            // AI Transcription
             if (message.serverContent?.modelTurn?.parts?.[0]?.text) {
               setAiTranscription(prev => prev + message.serverContent?.modelTurn?.parts?.[0]?.text);
+            }
+            
+            // Turn complete
+            if (message.serverContent?.turnComplete) {
+              setAiTranscription(prev => {
+                if (prev.trim()) {
+                  if (optionsRef.current?.onTurnComplete) {
+                    optionsRef.current.onTurnComplete(prev);
+                  }
+                  window.dispatchEvent(new CustomEvent('geminiLiveTurnComplete', { detail: { text: prev } }));
+                }
+                return ""; // Clear transcription for the next turn
+              });
             }
 
             // Function calling (Tools)
@@ -170,6 +227,9 @@ export function useGeminiLive() {
                       }]
                     });
                   }
+                } else if (call.name === 'prompt_user_for_file_upload') {
+                  setRequestedFileId(call.id);
+                  console.log("AI requested file upload");
                 }
               }
             }
@@ -256,11 +316,27 @@ export function useGeminiLive() {
     }
   }, [playNextInQueue, stop]);
 
+  const provideFileToAi = useCallback((fileContent: string, fileName: string) => {
+    if (!requestedFileId || !sessionRef.current) return;
+    
+    sessionRef.current.sendToolResponse({
+      functionResponses: [{
+        id: requestedFileId,
+        name: 'prompt_user_for_file_upload',
+        response: { 
+          result: `File uploaded successfully. File Name: ${fileName}\n\nContent:\n${fileContent}` 
+        }
+      }]
+    });
+    
+    setRequestedFileId(null);
+  }, [requestedFileId]);
+
   useEffect(() => {
     return () => {
       stop();
     };
   }, [stop]);
 
-  return { start, stop, isActive, error, transcription, aiTranscription, volume, setVolume };
+  return { start, stop, isActive, error, transcription, aiTranscription, volume, setVolume, requestedFileId, provideFileToAi };
 }
