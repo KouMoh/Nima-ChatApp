@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { IndianKanoonLogo } from '../components/IndianKanoonLogo';
 import { db, auth } from '../lib/firebase';
 import { 
   collection, 
@@ -923,7 +924,8 @@ export default function ChatRoom() {
               </div>
               <div className="mt-auto pt-4 border-t border-zinc-800 text-center">
                  <div className="flex justify-center items-center gap-2 text-xs text-zinc-500">
-                    <span>Powered by Indian Kanoon</span>
+                    <span>Powered by</span>
+                    <IndianKanoonLogo />
                  </div>
               </div>
             </div>
