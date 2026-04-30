@@ -6,8 +6,8 @@ import fs from "fs";
 import * as pdfParseModule from "pdf-parse";
 const pdfParse = (pdfParseModule as any).default || pdfParseModule;
 import mammoth from "mammoth";
-import * as xlsxModule from "xlsx";
-const xlsx = (xlsxModule as any).default || xlsxModule;
+import readXlsxFile from "read-excel-file/node";
+import { parse as parseCsv } from "csv-parse/sync";
 import { GoogleGenAI } from "@google/genai";
 
 const upload = multer({ dest: "uploads/" });
@@ -79,12 +79,33 @@ async function startServer() {
       } else if (extension === ".docx") {
         const result = await mammoth.extractRawText({ path: filePath });
         extractedText = result.value;
-      } else if (extension === ".xlsx" || extension === ".xls" || extension === ".csv") {
-        const workbook = xlsx.readFile(filePath);
-        workbook.SheetNames.forEach((sheetName) => {
-          const sheet = workbook.Sheets[sheetName];
-          extractedText += `\n--- Sheet: ${sheetName} ---\n`;
-          extractedText += xlsx.utils.sheet_to_csv(sheet);
+      } else if (extension === ".xlsx") {
+        const rows = await readXlsxFile(filePath);
+        extractedText += "\n--- Sheet: Sheet1 ---\n";
+        rows.forEach((row) => {
+          const cells = row.map((value: unknown) => {
+            if (value === null || value === undefined) return "";
+            const text = String(value).replace(/"/g, '""');
+            return /[",\n]/.test(text) ? `"${text}"` : text;
+          });
+          extractedText += cells.join(",") + "\n";
+        });
+      } else if (extension === ".csv") {
+        const csvRaw = fs.readFileSync(filePath, "utf-8");
+        const records = parseCsv(csvRaw, { relaxColumnCount: true }) as string[][];
+        extractedText = records
+          .map((row) =>
+            row
+              .map((cell) => {
+                const text = String(cell ?? "").replace(/"/g, '""');
+                return /[",\n]/.test(text) ? `"${text}"` : text;
+              })
+              .join(",")
+          )
+          .join("\n");
+      } else if (extension === ".xls") {
+        return res.status(400).json({
+          error: "Legacy .xls files are not supported. Please convert to .xlsx or .csv and upload again.",
         });
       } else {
         // Fallback or text-based files

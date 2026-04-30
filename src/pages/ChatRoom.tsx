@@ -21,7 +21,6 @@ import {
   Mic, 
   MicOff, 
   Video as VideoIcon, 
-  VideoOff, 
   Send, 
   Search, 
   Settings,
@@ -53,6 +52,77 @@ interface Message {
   createdAt: any;
 }
 
+interface ChatSession {
+  id: string;
+  title?: string;
+  findings?: string;
+  updatedAt?: any;
+  createdAt?: any;
+  mode?: 'text' | 'voice' | 'video';
+  persona?: string;
+  voice?: string;
+  [key: string]: any;
+}
+
+const DRAFT_CHAT_ID = 'draft';
+const DEFAULT_TITLES = new Set(['New Chat', 'Welcome Chat', 'Voice Session', 'Video Session']);
+
+const stripWrappingQuotes = (value: string) => value.replace(/^"|"$/g, '').trim();
+
+const buildFallbackTitle = (text: string) => {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return 'New Chat';
+  const short = words.slice(0, 5).join(' ');
+  return words.length > 5 ? `${short}...` : short;
+};
+
+const shouldRegenerateTitle = (title?: string) => !title || DEFAULT_TITLES.has(title);
+
+const toMillis = (value: any) => {
+  if (!value) return 0;
+  if (typeof value?.toMillis === 'function') return value.toMillis();
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number') return value;
+  const parsed = Date.parse(String(value));
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const generateTitleFromAiResponse = async (text: string) => {
+  const fallback = buildFallbackTitle(text);
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-1.5-flash",
+      contents: [{
+        role: 'user',
+        parts: [{
+          text: `Generate a short, concise topic title (max 5 words) for a conversation based on this AI response. Return ONLY the title text, no quotes, no prefixes: "${text.substring(0, 160)}"`
+        }]
+      }]
+    });
+    const rawTitle = (response as any)?.candidates?.[0]?.content?.parts?.[0]?.text || (response as any)?.text || '';
+    return stripWrappingQuotes(String(rawTitle)) || fallback;
+  } catch (err) {
+    return fallback;
+  }
+};
+
+const truncateForPreview = (text: string) => {
+  const cleaned = text.trim();
+  if (!cleaned) return '';
+  return cleaned.length > 80 ? `${cleaned.substring(0, 80)}...` : cleaned;
+};
+
+const buildSeedTitle = (text: string) => {
+  const words = text
+    .trim()
+    .replace(/\s+/g, ' ')
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 5);
+  if (words.length === 0) return 'Voice Session';
+  return words.join(' ');
+};
+
 const personas = {
   Friend: "You are NimmLy, chatting with your close friend. Use highly casual, conversational language, heavy local colloquial words, and relaxed pronunciation (e.g., 'gonna', 'wanna'). The tone is extremely laid-back, like relaxing at a party, but DO NOT say you are at a party. Pay close attention to the user's mood and adapt your own mood and energy to match theirs naturally—don't default to being overly excited all the time. Speak entirely informally as if two friends are hanging out. If speaking or understanding Odia, strictly use extremely local colloquialisms and strictly use the informal pronoun 'tu'. CRITICAL INSTRUCTION: Be highly proactive and talkative. Do not give short or silent answers. Elaborate fully on the subject. If explaining a process, recipe, or telling a story, provide the complete details without cutting yourself off, no matter how long it takes. Do not artificially limit your response length or stop speaking abruptly. Once you have completely finished sharing your thoughts, naturally ask an engaging question to keep the conversation flowing. If you finish speaking and the user does not respond within a few seconds, proactively speak up again to wake them up. You should gently poke fun at them, playfully ask if they are ignoring you, or give a very soft, friendly warning that you'll leave the conversation if they don't answer—just like real friends do. If the user interrupts you, stop and listen immediately.",
   Assistant: "You are NimmLy, a professional and efficient personal assistant. Be concise, polite, and directly address the user's needs in a clear voice.",
@@ -71,13 +141,18 @@ const voices = {
 };
 type VoiceType = keyof typeof voices;
 
+const SIDEBAR_WIDTH = 280;
+const FINDINGS_WIDTH = 400;
+
 export default function ChatRoom() {
   const { user, logout } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
-  const [inputText, setInputText] = useState("");
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isDesktop, setIsDesktop] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(min-width: 1024px)').matches;
+  });
   const [activeChat, setActiveChat] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<'home' | 'text'>('home');
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isCallActive, setIsCallActive] = useState(false);
@@ -86,13 +161,24 @@ export default function ChatRoom() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   
-  const [chatSessions, setChatSessions] = useState<any[]>([]);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [findings, setFindings] = useState<string>("");
   const [isFindingsExpanded, setIsFindingsExpanded] = useState(false);
+  const [allowAutoSelect, setAllowAutoSelect] = useState(true);
   
   const activeChatRef = useRef(activeChat);
   const chatSessionsRef = useRef(chatSessions);
   const messagesRef = useRef(messages);
+  const appliedContextRef = useRef<string | null>(null);
+  const initializedRef = useRef(false);
+  const pendingChatIdRef = useRef<string | null>(null);
+  const isTitleUpdateInFlightRef = useRef(false);
+
+  const visibleChatSessions = chatSessions.filter((session) => {
+    const isLegacySystemChat = session.id === `ai_${user?.uid}`;
+    const isLegacyWelcomeTitle = (session.title || '').trim() === 'Welcome Chat';
+    return !isLegacySystemChat && !isLegacyWelcomeTitle;
+  });
   
   useEffect(() => {
     activeChatRef.current = activeChat;
@@ -105,6 +191,53 @@ export default function ChatRoom() {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    if (!user || initializedRef.current) return;
+    initializedRef.current = true;
+    setAllowAutoSelect(false);
+    setActiveChat(DRAFT_CHAT_ID);
+    setMessages([]);
+    setFindings("");
+  }, [user]);
+
+  useEffect(() => {
+    if (!activeChat) {
+      appliedContextRef.current = null;
+      return;
+    }
+    if (appliedContextRef.current === activeChat) return;
+    const session = chatSessions.find((s) => s.id === activeChat);
+    if (!session) return;
+    if (session.persona && session.persona in personas) {
+      setSelectedPersona(session.persona as PersonaType);
+    }
+    if (session.voice && session.voice in voices) {
+      setSelectedVoice(session.voice as VoiceType);
+    }
+    if (session.mode === 'video') setIsVideoEnabled(true);
+    if (session.mode === 'voice' || session.mode === 'text') setIsVideoEnabled(false);
+    appliedContextRef.current = activeChat;
+  }, [activeChat, chatSessions]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const media = window.matchMedia('(min-width: 1024px)');
+    const update = (evt: MediaQueryListEvent | MediaQueryList) => {
+      setIsDesktop(evt.matches);
+    };
+    update(media);
+    if ('addEventListener' in media) {
+      media.addEventListener('change', update);
+      return () => media.removeEventListener('change', update);
+    }
+    media.addListener(update);
+    return () => media.removeListener(update);
+  }, []);
+
+  useEffect(() => {
+    if (isDesktop) setIsSidebarOpen(true);
+  }, [isDesktop]);
 
   const updateFindings = async (chatId: string, currentMessages: Message[]) => {
     if (currentMessages.length === 0) return;
@@ -132,84 +265,189 @@ export default function ChatRoom() {
     }
   };
 
+  const buildLocalMessage = (senderId: string, content: string, type: Message['type']): Message => ({
+    id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    senderId,
+    content,
+    type,
+    createdAt: new Date()
+  });
+
+  const appendLocalMessage = (message: Message) => {
+    const nextMessages = [...messagesRef.current, message];
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
+    return nextMessages;
+  };
+
+  const persistDraftChat = async (
+    aiText: string,
+    pendingMessages: Message[],
+    mode: 'text' | 'voice' | 'video'
+  ) => {
+    if (!user) return null;
+    const currentChatId = activeChatRef.current;
+    if (currentChatId && currentChatId !== DRAFT_CHAT_ID) return currentChatId;
+
+    const newChatId = doc(collection(db, 'chats')).id;
+    const title = await generateTitleFromAiResponse(aiText);
+    const lastMessage = aiText.length > 80 ? `${aiText.substring(0, 80)}...` : aiText;
+
+    await setDoc(doc(db, 'chats', newChatId), {
+      id: newChatId,
+      participants: [user.uid],
+      type: 'ai',
+      mode,
+      persona: selectedPersona,
+      voice: selectedVoice,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      title,
+      lastMessage
+    });
+
+    for (const message of pendingMessages) {
+      await addDoc(collection(db, 'chats', newChatId, 'messages'), {
+        chatId: newChatId,
+        senderId: message.senderId,
+        content: message.content,
+        type: message.type,
+        createdAt: serverTimestamp()
+      });
+    }
+
+    pendingChatIdRef.current = newChatId;
+    setAllowAutoSelect(true);
+    setActiveChat(newChatId);
+    return newChatId;
+  };
+
+  const ensureDraftChatSession = async (mode: 'voice' | 'video') => {
+    if (!user) return null;
+    const currentChatId = activeChatRef.current;
+    if (currentChatId && currentChatId !== DRAFT_CHAT_ID) return currentChatId;
+
+    const newChatId = doc(collection(db, 'chats')).id;
+    await setDoc(doc(db, 'chats', newChatId), {
+      id: newChatId,
+      participants: [user.uid],
+      type: 'ai',
+      mode,
+      persona: selectedPersona,
+      voice: selectedVoice,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      title: mode === 'video' ? 'Video Session' : 'Voice Session',
+      lastMessage: 'Live session started'
+    });
+
+    pendingChatIdRef.current = newChatId;
+    setAllowAutoSelect(true);
+    setActiveChat(newChatId);
+    return newChatId;
+  };
+
+  const maybeUpdateSessionTitle = async (chatId: string, seedText: string) => {
+    const cleaned = seedText.trim();
+    if (!cleaned) return;
+    if (isTitleUpdateInFlightRef.current) return;
+
+    const currentTitle = chatSessionsRef.current?.find((c) => c.id === chatId)?.title;
+    if (!shouldRegenerateTitle(currentTitle)) return;
+
+    isTitleUpdateInFlightRef.current = true;
+    try {
+      const generatedTitle = await generateTitleFromAiResponse(cleaned);
+      const newTitle = shouldRegenerateTitle(generatedTitle) ? buildSeedTitle(cleaned) : generatedTitle;
+      await setDoc(doc(db, 'chats', chatId), {
+        title: newTitle || buildFallbackTitle(cleaned),
+        lastMessage: truncateForPreview(cleaned),
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    } catch (_err) {
+      // Non-critical metadata enhancement
+    } finally {
+      isTitleUpdateInFlightRef.current = false;
+    }
+  };
+
   const { start: startLive, stop: stopLive, isActive: isLiveActive, aiTranscription, transcription: userTranscription, volume, setVolume, requestedFileId, provideFileToAi } = useGeminiLive({
     onTurnComplete: async (text) => {
+      if (!text.trim()) return;
+
       const chatId = activeChatRef.current;
-      if (text.trim() && chatId) {
-        try {
-          await addDoc(collection(db, 'chats', chatId, 'messages'), {
-            chatId: chatId,
-            senderId: 'ai',
-            content: text,
-            type: 'audio',
-            createdAt: serverTimestamp()
-          });
+      const aiMessage = buildLocalMessage('ai', text, 'audio');
 
-          // Generate title if needed
-          const currentTitle = chatSessionsRef.current?.find(c => c.id === chatId)?.title;
-          let newTitle = currentTitle;
-          if (!newTitle || newTitle === 'New Chat' || newTitle === 'Welcome Chat' || newTitle === 'Voice Session') {
-            try {
-              const titleResponse = await ai.models.generateContent({
-                model: "gemini-1.5-flash",
-                contents: [{ role: 'user', parts: [{ text: `Generate a short, concise topic title (max 5 words) for a conversation that includes this message. Return ONLY the title text, no quotes, no prefixes: "${text.substring(0, 100)}"` }] }]
-              });
-              newTitle = (titleResponse as any).candidates?.[0]?.content?.parts?.[0]?.text?.trim() || text.split(' ').slice(0, 4).join(' ') + '...';
-              newTitle = newTitle.replace(/^"|"$/g, '').trim();
-            } catch (err) {
-              newTitle = text.split(' ').slice(0, 4).join(' ') + '...';
-            }
-          }
-
-          await setDoc(doc(db, 'chats', chatId), {
-            title: newTitle || currentTitle || "Voice Session",
-            lastMessage: text.substring(0, 50) + "...",
-            updatedAt: serverTimestamp()
-          }, { merge: true });
-
-          updateFindings(chatId, [...messagesRef.current, { id: 'temp', content: text, senderId: 'ai', type: 'audio', createdAt: new Date() }]);
-        } catch (err) {
-          console.error("Failed to save transcript turn", err);
+      if (!chatId || chatId === DRAFT_CHAT_ID) {
+        const nextMessages = appendLocalMessage(aiMessage);
+        const newChatId = await persistDraftChat(text, nextMessages, isVideoEnabled ? 'video' : 'voice');
+        if (newChatId) {
+          updateFindings(newChatId, nextMessages);
         }
+        return;
+      }
+
+      try {
+        await addDoc(collection(db, 'chats', chatId, 'messages'), {
+          chatId: chatId,
+          senderId: 'ai',
+          content: text,
+          type: 'audio',
+          createdAt: serverTimestamp()
+        });
+
+        const currentTitle = chatSessionsRef.current?.find(c => c.id === chatId)?.title;
+        const titleSeed = messagesRef.current.find((m) => m.senderId !== 'ai' && m.content.trim())?.content || text;
+        const generatedTitle = shouldRegenerateTitle(currentTitle) ? await generateTitleFromAiResponse(titleSeed) : currentTitle;
+        const newTitle = shouldRegenerateTitle(generatedTitle) ? buildSeedTitle(titleSeed) : generatedTitle;
+        const lastMessage = truncateForPreview(text);
+
+        await setDoc(doc(db, 'chats', chatId), {
+          title: newTitle || currentTitle || "Voice Session",
+          lastMessage: lastMessage,
+          mode: isVideoEnabled ? 'video' : 'voice',
+          persona: selectedPersona,
+          voice: selectedVoice,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+
+        updateFindings(chatId, [...messagesRef.current, { ...aiMessage, id: 'temp' }]);
+      } catch (err) {
+        console.error("Failed to save transcript turn", err);
       }
     },
     onUserTurnComplete: async (text) => {
+      if (!text.trim() || !user) return;
+
       const chatId = activeChatRef.current;
-      if (text.trim() && chatId && user) {
-        try {
-          await addDoc(collection(db, 'chats', chatId, 'messages'), {
-            chatId: chatId,
-            senderId: user.uid,
-            content: text,
-            type: 'audio',
-            createdAt: serverTimestamp()
-          });
-          
-          const currentTitle = chatSessionsRef.current?.find(c => c.id === chatId)?.title;
-          let newTitle = currentTitle;
-          if (!newTitle || newTitle === 'New Chat' || newTitle === 'Welcome Chat' || newTitle === 'Voice Session') {
-            try {
-              const titleResponse = await ai.models.generateContent({
-                model: "gemini-1.5-flash",
-                contents: [{ role: 'user', parts: [{ text: `Generate a short, concise topic title (max 5 words) for a conversation that includes this user message. Return ONLY the title text, no quotes, no prefixes: "${text.substring(0, 100)}"` }] }]
-              });
-              newTitle = (titleResponse as any).candidates?.[0]?.content?.parts?.[0]?.text?.trim() || text.split(' ').slice(0, 4).join(' ') + '...';
-              newTitle = newTitle.replace(/^"|"$/g, '').trim();
-            } catch (err) {
-              newTitle = text.split(' ').slice(0, 4).join(' ') + '...';
-            }
-          }
+      const userMessage = buildLocalMessage(user.uid, text, 'audio');
 
-          await setDoc(doc(db, 'chats', chatId), {
-            title: newTitle || currentTitle || "Voice Session",
-            lastMessage: text.substring(0, 50) + "...",
-            updatedAt: serverTimestamp()
-          }, { merge: true });
+      if (!chatId || chatId === DRAFT_CHAT_ID) {
+        appendLocalMessage(userMessage);
+        return;
+      }
 
-          updateFindings(chatId, [...messagesRef.current, { id: 'temp', content: text, senderId: user.uid, type: 'audio', createdAt: new Date() }]);
-        } catch (err) {
-          console.error("Failed to save user transcript turn", err);
-        }
+      try {
+        await addDoc(collection(db, 'chats', chatId, 'messages'), {
+          chatId: chatId,
+          senderId: user.uid,
+          content: text,
+          type: 'audio',
+          createdAt: serverTimestamp()
+        });
+
+        const lastMessage = truncateForPreview(text);
+        await setDoc(doc(db, 'chats', chatId), {
+          lastMessage: lastMessage,
+          mode: isVideoEnabled ? 'video' : 'voice',
+          persona: selectedPersona,
+          voice: selectedVoice,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+
+        await maybeUpdateSessionTitle(chatId, text);
+      } catch (err) {
+        console.error("Failed to save user transcript turn", err);
       }
     }
   });
@@ -218,17 +456,21 @@ export default function ChatRoom() {
   useEffect(() => {
     if (!user) return;
     const unsub = onSnapshot(query(
-      collection(db, 'chats'), 
+      collection(db, 'chats'),
       where('participants', 'array-contains', user.uid)
     ), (snapshot) => {
-      const sessions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      sessions.sort((a: any, b: any) => {
-        const tA = a.updatedAt?.toMillis ? a.updatedAt.toMillis() : 0;
-        const tB = b.updatedAt?.toMillis ? b.updatedAt.toMillis() : 0;
-        return tB - tA;
+      const sessions: ChatSession[] = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ChatSession[];
+      sessions.sort((a, b) => {
+        const delta = toMillis(b.updatedAt || b.createdAt) - toMillis(a.updatedAt || a.createdAt);
+        if (delta !== 0) return delta;
+        return (a.id || '').localeCompare(b.id || '');
       });
       setChatSessions(sessions);
-      
+
+      if (pendingChatIdRef.current && sessions.some(s => s.id === pendingChatIdRef.current)) {
+        pendingChatIdRef.current = null;
+      }
+
       if (activeChatRef.current) {
         const current = sessions.find(s => s.id === activeChatRef.current);
         if (current) setFindings(current.findings || "");
@@ -239,16 +481,24 @@ export default function ChatRoom() {
     return unsub;
   }, [user]);
 
-  // Initialization: Ensure user profile and PRIVATE chat exist
+  useEffect(() => {
+    if (!allowAutoSelect) return;
+    if (visibleChatSessions.length === 0) return;
+    if (activeChat === DRAFT_CHAT_ID) return;
+    if (pendingChatIdRef.current && pendingChatIdRef.current === activeChat) return;
+    const activeExists = activeChat && visibleChatSessions.some(s => s.id === activeChat);
+    if (!activeExists) {
+      setActiveChat(visibleChatSessions[0].id);
+    }
+  }, [visibleChatSessions, activeChat, allowAutoSelect]);
+
+  // Initialization: Ensure user profile exists
   useEffect(() => {
     if (!user) return;
 
     const initialize = async () => {
       try {
-        const privateChatId = `ai_${user.uid}`;
-        setActiveChat(privateChatId);
-
-        // 1. Ensure user profile exists
+        // Ensure user profile exists
         const userDocRef = doc(db, 'users', user.uid);
         const userDoc = await getDoc(userDocRef);
         if (!userDoc.exists()) {
@@ -261,21 +511,6 @@ export default function ChatRoom() {
             lastSeen: serverTimestamp()
           });
         }
-
-        // 2. Ensure private chat exists (we'll just use the first one from history or create a new one dynamically, but keep legacy AI chat)
-        const chatDocRef = doc(db, 'chats', privateChatId);
-        const chatDoc = await getDoc(chatDocRef);
-        if (!chatDoc.exists()) {
-          await setDoc(chatDocRef, {
-            id: privateChatId,
-            participants: [user.uid],
-            type: 'ai',
-            updatedAt: serverTimestamp(),
-            title: 'Welcome Chat',
-            lastMessage: 'Welcome to your private NimmLy session!'
-          });
-        }
-        
       } catch (err) {
         console.error("Initialization error:", err);
       }
@@ -290,11 +525,17 @@ export default function ChatRoom() {
       return;
     }
 
-    setMessages([]); // Clear immediately to prevent cross-chat bleed
+    if (activeChat === DRAFT_CHAT_ID) {
+      setMessages([]);
+      return;
+    }
+    if (pendingChatIdRef.current !== activeChat) {
+      setMessages([]); // Clear immediately to prevent cross-chat bleed
+    }
     const q = query(
       collection(db, 'chats', activeChat, 'messages'),
       orderBy('createdAt', 'asc'),
-      limit(50)
+      limit(200)
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -326,159 +567,84 @@ export default function ChatRoom() {
     }
   }, [isVideoEnabled]);
 
-  const handleSendMessage = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (!inputText.trim() || !activeChat) return;
-
-    const text = inputText;
-    setInputText("");
-
-    try {
-      // Send to Firestore
-      try {
-        await addDoc(collection(db, 'chats', activeChat, 'messages'), {
-          chatId: activeChat,
-          senderId: user?.uid,
-          content: text,
-          type: 'text',
-          createdAt: serverTimestamp()
-        });
-      } catch (err) {
-        console.error("User message add failed", err);
-        throw err;
-      }
-
-      // If it's a "New Chat", generate a title from the first message
-      const currentSession = chatSessions.find(c => c.id === activeChat);
-      let newTitle = currentSession?.title;
-      if (!newTitle || newTitle === 'New Chat' || newTitle === 'Welcome Chat') {
-        try {
-          const titleResponse = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
-            contents: [{ role: 'user', parts: [{ text: `Generate a short, concise topic title (max 5 words) for a conversation that starts with this message. Return ONLY the title text, no quotes, no prefixes: "${text}"` }] }]
-          });
-          newTitle = titleResponse.text?.trim() || text.split(' ').slice(0, 4).join(' ') + '...';
-          // Clean up quotes if Gemini included them
-          newTitle = newTitle.replace(/^"|"$/g, '').trim();
-        } catch (err) {
-          console.error("Failed to generate title", err);
-          newTitle = text.split(' ').slice(0, 4).join(' ') + (text.split(' ').length > 4 ? '...' : '');
-        }
-      }
-
-      // Update chat metadata
-      try {
-        await setDoc(doc(db, 'chats', activeChat), {
-          lastMessage: text,
-          title: newTitle,
-          updatedAt: serverTimestamp()
-        }, { merge: true });
-      } catch (err) {
-        console.error("Chat update failed", err);
-        throw err;
-      }
-
-      // Gemini Response (if not using Live)
-      if (!isLiveActive) {
-        let aiResponse = "I'm sorry, I couldn't process that.";
-        try {
-          const result = await ai.models.generateContent({
-            model: "gemini-1.5-flash",
-            config: {
-              systemInstruction: personas[selectedPersona]
-            },
-            contents: [
-              ...messages.slice(-10).map(m => ({
-                role: m.senderId === 'ai' ? 'model' : 'user',
-                parts: [{ text: m.content }]
-              })),
-              { role: 'user', parts: [{ text }] }
-            ]
-          });
-          aiResponse = (result as any).candidates?.[0]?.content?.parts?.[0]?.text || aiResponse;
-        } catch (err) {
-          console.error("AI response generation failed", err);
-        }
-
-        try {
-          await addDoc(collection(db, 'chats', activeChat, 'messages'), {
-            chatId: activeChat,
-            senderId: 'ai',
-            content: aiResponse,
-            type: 'text',
-            createdAt: serverTimestamp()
-          });
-        } catch (err) {
-          console.error("AI message add failed", err);
-          throw err;
-        }
-
-        try {
-          await setDoc(doc(db, 'chats', activeChat), {
-            lastMessage: aiResponse,
-            updatedAt: serverTimestamp()
-          }, { merge: true });
-
-          // Distill findings after AI response
-          updateFindings(activeChat, [...messages, { id: 'temp-user', content: text, senderId: user?.uid as string, type: 'text', createdAt: new Date() }, { id: 'temp-ai', content: aiResponse, senderId: 'ai', type: 'text', createdAt: new Date() }]);
-        } catch (err) {
-          console.error("Chat metadata update after AI failed", err);
-          throw err;
-        }
-      }
-    } catch (err) {
-      console.error("Message error:", err);
-    }
-  };
-
   const toggleCall = async () => {
-    setActiveView('home');
-    if (isLiveActive) {
-      if (aiTranscription.trim() && activeChat) {
-        try {
-          await addDoc(collection(db, 'chats', activeChat, 'messages'), {
-            chatId: activeChat,
-            senderId: 'ai',
-            content: aiTranscription,
-            type: 'audio',
-            createdAt: serverTimestamp()
-          });
-        } catch (err) {}
+    if (isCallActive) {
+      const currentChatId = activeChatRef.current;
+      const canPersist = currentChatId && currentChatId !== DRAFT_CHAT_ID;
+      const sessionMode = isVideoEnabled ? 'video' : 'voice';
+      let localMessages = messagesRef.current;
+
+      if (userTranscription?.trim() && user) {
+        const userMessage = buildLocalMessage(user.uid, userTranscription, 'audio');
+        if (canPersist) {
+          try {
+            await addDoc(collection(db, 'chats', currentChatId as string, 'messages'), {
+              chatId: currentChatId,
+              senderId: user.uid,
+              content: userTranscription,
+              type: 'audio',
+              createdAt: serverTimestamp()
+            });
+          } catch (err) {}
+        } else {
+          localMessages = appendLocalMessage(userMessage);
+        }
       }
-      
-      if (userTranscription?.trim() && activeChat && user) {
-        try {
-          await addDoc(collection(db, 'chats', activeChat, 'messages'), {
-            chatId: activeChat,
-            senderId: user.uid,
-            content: userTranscription,
-            type: 'audio',
-            createdAt: serverTimestamp()
-          });
-        } catch (err) {}
+
+      if (aiTranscription.trim()) {
+        const aiMessage = buildLocalMessage('ai', aiTranscription, 'audio');
+        if (canPersist) {
+          try {
+            await addDoc(collection(db, 'chats', currentChatId as string, 'messages'), {
+              chatId: currentChatId,
+              senderId: 'ai',
+              content: aiTranscription,
+              type: 'audio',
+              createdAt: serverTimestamp()
+            });
+          } catch (err) {}
+        } else {
+          localMessages = appendLocalMessage(aiMessage);
+        }
+      }
+
+      if (!canPersist && aiTranscription.trim()) {
+        const newChatId = await persistDraftChat(aiTranscription, localMessages, sessionMode);
+        if (newChatId) {
+          updateFindings(newChatId, localMessages);
+        }
       }
 
       stopLive();
       setIsCallActive(false);
     } else {
-      let currentActiveChat = activeChat;
+      const sessionMode = isVideoEnabled ? 'video' : 'voice';
+      let currentActiveChat = activeChatRef.current;
       if (!currentActiveChat) {
-        if (!user) return;
-        const newChatId = doc(collection(db, 'chats')).id;
-        await setDoc(doc(db, 'chats', newChatId), {
-          id: newChatId,
-          participants: [user.uid],
-          type: 'ai',
-          updatedAt: serverTimestamp(),
-          title: 'Voice Session'
-        });
-        setActiveChat(newChatId);
-        currentActiveChat = newChatId;
+        setAllowAutoSelect(false);
+        setActiveChat(DRAFT_CHAT_ID);
+        setMessages([]);
+        setFindings("");
+        currentActiveChat = DRAFT_CHAT_ID;
+      }
+
+      if (currentActiveChat === DRAFT_CHAT_ID) {
+        const persistedChatId = await ensureDraftChatSession(sessionMode);
+        if (persistedChatId) {
+          currentActiveChat = persistedChatId;
+        }
+      } else {
+        await setDoc(doc(db, 'chats', currentActiveChat as string), {
+          mode: sessionMode,
+          persona: selectedPersona,
+          voice: selectedVoice
+        }, { merge: true });
       }
       
       let historyContext = "";
-      if (messages.length > 0) {
-         historyContext = messages.map(m => `[${m.senderId === 'ai' ? 'NimmLy' : 'User'}]: ${m.content}`).join('\n\n');
+      const currentMessages = messagesRef.current;
+      if (currentMessages.length > 0) {
+         historyContext = currentMessages.map(m => `[${m.senderId === 'ai' ? 'NimmLy' : 'User'}]: ${m.content}`).join('\n\n');
       }
       startLive(personas[selectedPersona], selectedVoice, historyContext);
       setIsCallActive(true);
@@ -487,38 +653,32 @@ export default function ChatRoom() {
 
   const startNewChat = async () => {
     if (!user) return;
-    const newChatId = doc(collection(db, 'chats')).id;
-    await setDoc(doc(db, 'chats', newChatId), {
-      id: newChatId,
-      participants: [user.uid],
-      type: 'ai',
-      updatedAt: serverTimestamp(),
-      title: 'New Chat'
-    });
-    setActiveChat(newChatId);
-    setActiveView('text');
-    if (window.innerWidth < 1024) setIsSidebarOpen(false);
+    setAllowAutoSelect(false);
+    setActiveChat(DRAFT_CHAT_ID);
+    setMessages([]);
+    setFindings("");
+    if (!isDesktop) setIsSidebarOpen(false);
   };
 
   return (
     <div className="flex h-screen bg-[#050505] text-white overflow-hidden font-sans">
       {/* Background Hero Text (Bold Typography) */}
       <div className="fixed inset-0 flex items-center justify-center pointer-events-none z-0">
-        <h1 className="text-[20vw] font-black text-white/[0.02] uppercase tracking-tighter leading-none select-none">
+        <h1 className="text-[20vw] font-black text-white/2 uppercase tracking-tighter leading-none select-none">
           {isLiveActive ? "Thinking" : "NimmLy"}
         </h1>
       </div>
 
       {/* Sidebar */}
       <AnimatePresence mode="wait">
-        {(isSidebarOpen || window.innerWidth >= 1024) && (
+        {(isSidebarOpen || isDesktop) && (
           <motion.aside
             initial={{ x: -280, opacity: 0 }}
             animate={{ x: 0, opacity: 1, width: isSidebarOpen ? 280 : 0 }}
             exit={{ x: -280, opacity: 0 }}
             className={cn(
-              "fixed inset-y-0 left-0 lg:relative border-r border-[#27272a] flex flex-col overflow-hidden bg-[#050505] z-50 transition-all duration-300",
-              !isSidebarOpen && "lg:w-0 lg:border-none"
+              "fixed inset-y-0 left-0 border-r border-[#27272a] flex flex-col overflow-hidden bg-[#050505] z-50 transition-all duration-300",
+              !isSidebarOpen && "border-none"
             )}
           >
             <div className="p-6 flex flex-col gap-8 h-full">
@@ -544,23 +704,6 @@ export default function ChatRoom() {
                 </button>
               </div>
 
-              <nav className="space-y-2">
-                <button 
-                  onClick={() => { setActiveView('home'); setIsVideoEnabled(true); if(window.innerWidth < 1024) setIsSidebarOpen(false); }}
-                  className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold transition-all", activeView === 'home' && isVideoEnabled ? "bg-[#18181b] text-white" : "text-zinc-500 hover:text-white")}
-                >
-                  <VideoIcon className={cn("w-4 h-4", activeView === 'home' && isVideoEnabled ? "text-[#3b82f6]" : "")} />
-                  <span>Video Chat</span>
-                </button>
-                <button 
-                  onClick={() => { setActiveView('home'); setIsVideoEnabled(false); if(window.innerWidth < 1024) setIsSidebarOpen(false); }}
-                  className={cn("w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold transition-all", activeView === 'home' && !isVideoEnabled ? "bg-[#18181b] text-white" : "text-zinc-500 hover:text-white")}
-                >
-                  <Mic className={cn("w-4 h-4", activeView === 'home' && !isVideoEnabled ? "text-[#3b82f6]" : "")} />
-                  <span>Voice Assistant</span>
-                </button>
-              </nav>
-
               <div className="pt-2 border-t border-zinc-800/50 mt-2">
                 <button 
                   onClick={startNewChat}
@@ -574,11 +717,23 @@ export default function ChatRoom() {
               <div className="pt-4 flex-1 overflow-y-auto scrollbar-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
                 <h3 className="text-xs font-semibold text-white mb-2 px-3">Chats</h3>
                 <div className="space-y-0.5">
-                   {chatSessions.map(session => (
+                   {visibleChatSessions.map(session => (
                      <button
                        key={session.id}
-                       onClick={() => { setActiveChat(session.id); setActiveView('text'); if(window.innerWidth < 1024) setIsSidebarOpen(false); }}
-                       className={cn("w-full text-left max-w-full overflow-hidden text-ellipsis whitespace-nowrap px-3 py-2 rounded-lg text-[13px] transition-all font-medium text-[#e4e4e7] hover:bg-[#27272a]/50 hover:text-white", activeChat === session.id && activeView === 'text' && "bg-[#27272a]/80 text-white")}
+                       onClick={() => {
+                         setAllowAutoSelect(true);
+                         setActiveChat(session.id);
+                         if (!isDesktop) setIsSidebarOpen(false);
+                         if (session.persona && session.persona in personas) {
+                           setSelectedPersona(session.persona as PersonaType);
+                         }
+                         if (session.voice && session.voice in voices) {
+                           setSelectedVoice(session.voice as VoiceType);
+                         }
+                         if (session.mode === 'video') setIsVideoEnabled(true);
+                         if (session.mode === 'voice' || session.mode === 'text') setIsVideoEnabled(false);
+                       }}
+                      className={cn("w-full text-left max-w-full overflow-hidden text-ellipsis whitespace-nowrap px-3 py-2 rounded-lg text-[13px] transition-all font-medium text-[#e4e4e7] hover:bg-[#27272a]/50 hover:text-white", activeChat === session.id && "bg-[#27272a]/80 text-white")}
                        title={session.title || 'Untitled Session'}
                      >
                        {session.title || 'Untitled Session'}
@@ -592,21 +747,31 @@ export default function ChatRoom() {
       </AnimatePresence>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col relative z-0 w-full">
+      <main
+        className="flex-1 flex flex-col relative z-0 w-full transition-[padding] duration-300"
+        style={{
+          paddingLeft: isDesktop && isSidebarOpen ? SIDEBAR_WIDTH : 0,
+          paddingRight: isDesktop && isFindingsExpanded ? FINDINGS_WIDTH : 0
+        }}
+      >
         {/* Top Bar */}
-         <header className="absolute top-0 w-full z-50 p-4 md:p-8 flex flex-wrap items-center justify-between gap-4 pointer-events-none">
-           <div className="flex flex-wrap items-center gap-2 md:gap-4 pointer-events-auto">
-             {!isSidebarOpen && (
-               <button onClick={() => setIsSidebarOpen(true)} className="p-2.5 bg-[#18181b] rounded-xl text-white shrink-0">
-                 <Maximize2 className="w-5 h-5" />
-               </button>
-             )}
-             <div className="call-status flex items-center gap-2 md:gap-3 bg-[#3b82f6]/10 border border-[#3b82f6]/20 px-3 md:px-4 py-1.5 md:py-2 rounded-full shrink-0">
-               <div className={cn("w-2 h-2 rounded-full bg-[#3b82f6] shrink-0", isCallActive && "animate-pulse")} />
-               <span className="text-[9px] md:text-[10px] font-bold text-[#3b82f6] uppercase tracking-widest whitespace-nowrap hidden sm:inline">
-                 {isLiveActive ? "Live Session" : "NimmLy Ready"}
-               </span>
-             </div>
+         <header className="absolute top-0 w-full z-50 p-4 md:p-8 pointer-events-none">
+           <div className="w-full flex flex-wrap items-start justify-between gap-2 md:gap-3 pointer-events-auto">
+            {!isSidebarOpen && (
+              <button onClick={() => setIsSidebarOpen(true)} className="p-2.5 bg-[#18181b] rounded-xl text-white shrink-0">
+                <Maximize2 className="w-5 h-5" />
+              </button>
+            )}
+            <div className="call-status flex items-center gap-2 md:gap-3 bg-[#3b82f6]/10 border border-[#3b82f6]/20 px-3 md:px-4 py-1.5 md:py-2 rounded-full shrink-0">
+              <div className={cn("w-2 h-2 rounded-full bg-[#3b82f6] shrink-0", isCallActive && "animate-pulse")} />
+              <span className="text-[9px] md:text-[10px] font-bold text-[#3b82f6] uppercase tracking-widest whitespace-nowrap hidden sm:inline">
+                {isCallActive ? (isLiveActive ? "Voice Session Live" : "Connecting...") : "Voice Assistant Ready"}
+              </span>
+            </div>
+
+            <div className="px-3 md:px-4 h-10 md:h-12 rounded-full border border-[#27272a] bg-[#18181b] flex items-center text-[9px] md:text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              Voice Mode
+            </div>
              
              <div className="relative flex items-center pointer-events-auto bg-[#18181b] border border-[#27272a] hover:border-[#3b82f6]/50 transition-colors rounded-full px-3 md:px-4 py-1.5 md:py-2 shrink-0 h-10 md:h-12">
                <span className="text-[10px] text-zinc-500 mr-2 font-bold uppercase hidden md:inline">Persona</span>
@@ -615,6 +780,11 @@ export default function ChatRoom() {
                  onChange={async (e) => {
                    const newPersona = e.target.value as PersonaType;
                    setSelectedPersona(newPersona);
+                   if (activeChat) {
+                     await setDoc(doc(db, 'chats', activeChat), {
+                       persona: newPersona
+                     }, { merge: true });
+                   }
                    if (isLiveActive) {
                      if (aiTranscription.trim() && activeChat) {
                        try {
@@ -667,6 +837,11 @@ export default function ChatRoom() {
                  onChange={async (e) => {
                    const newVoice = e.target.value as VoiceType;
                    setSelectedVoice(newVoice);
+                   if (activeChat) {
+                     await setDoc(doc(db, 'chats', activeChat), {
+                       voice: newVoice
+                     }, { merge: true });
+                   }
                    if (isLiveActive) {
                      if (aiTranscription.trim() && activeChat) {
                        try {
@@ -703,7 +878,7 @@ export default function ChatRoom() {
                      }, 500);
                    }
                  }}
-                 className="bg-transparent text-[10px] md:text-xs font-bold uppercase tracking-wider text-zinc-300 outline-none cursor-pointer appearance-none pr-6 max-w-[100px] md:max-w-none text-ellipsis"
+                 className="bg-transparent text-[10px] md:text-xs font-bold uppercase tracking-wider text-zinc-300 outline-none cursor-pointer appearance-none pr-6 max-w-25 md:max-w-none text-ellipsis"
                >
                  {Object.entries(voices).map(([val, label]) => (
                    <option key={val} value={val} className="bg-[#18181b] text-white py-1">{label}</option>
@@ -713,7 +888,7 @@ export default function ChatRoom() {
              </div>
            </div>
 
-           <div className="flex flex-wrap items-center justify-end gap-2 pointer-events-auto">
+           <div className="flex flex-wrap items-center justify-end gap-2 pointer-events-auto ml-auto">
             {activeChat && (
               <button 
                 onClick={() => setIsFindingsExpanded(!isFindingsExpanded)}
@@ -729,15 +904,7 @@ export default function ChatRoom() {
                 <span className="hidden sm:inline">Findings</span>
               </button>
             )}
-              {activeView === 'text' && (
-                <button 
-                  onClick={() => setActiveView('home')}
-                  className="flex items-center gap-2 px-3 md:px-4 h-10 md:h-12 bg-[#18181b] hover:bg-[#27272a] text-zinc-400 hover:text-white rounded-xl md:rounded-2xl transition-all text-[10px] md:text-xs font-bold uppercase tracking-wider mr-2 border border-[#27272a]"
-                >
-                  <X className="w-4 h-4 shrink-0" /> <span className="hidden sm:inline whitespace-nowrap">Close Chat</span>
-                </button>
-              )}
-              <div className="flex items-center gap-2 bg-[#18181b] border border-[#27272a] rounded-xl md:rounded-2xl px-2 md:px-3 h-10 md:h-12 hidden md:flex shrink-0 group hover:border-[#3b82f6]/50 transition-colors">
+              <div className="items-center gap-2 bg-[#18181b] border border-[#27272a] rounded-xl md:rounded-2xl px-2 md:px-3 h-10 md:h-12 hidden md:flex shrink-0 group hover:border-[#3b82f6]/50 transition-colors">
                 <button onClick={() => setVolume(v => v === 0 ? 1 : 0)} className="text-zinc-400 hover:text-[#3b82f6] transition-colors" title="AI Volume">
                    {volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                 </button>
@@ -759,20 +926,14 @@ export default function ChatRoom() {
                 {isMuted ? <MicOff className="w-4 h-4 md:w-5 md:h-5 text-red-500" /> : <Mic className="w-4 h-4 md:w-5 md:h-5" />}
               </button>
               <button 
-                onClick={() => setIsVideoEnabled(!isVideoEnabled)}
-                className="w-10 h-10 md:w-12 md:h-12 bg-[#18181b] rounded-xl md:rounded-2xl flex items-center justify-center hover:bg-[#27272a] transition-all"
-              >
-                {isVideoEnabled ? <VideoIcon className="w-4 h-4 md:w-5 md:h-5 text-[#3b82f6]" /> : <VideoOff className="w-4 h-4 md:w-5 md:h-5 text-zinc-500" />}
-              </button>
-              <button 
                 onClick={toggleCall}
                 className={cn(
                   "px-4 md:px-6 h-10 md:h-12 rounded-xl md:rounded-2xl flex items-center justify-center text-[9px] md:text-[10px] font-black uppercase tracking-widest transition-all",
-                  isLiveActive ? "bg-red-500 text-white" : "bg-white text-black hover:bg-zinc-200"
+                  isCallActive ? "bg-red-500 text-white" : "bg-white text-black hover:bg-zinc-200"
                 )}
               >
-                <span className="hidden sm:inline">{isLiveActive ? "End Session" : "Start Live"}</span>
-                <span className="sm:hidden">{isLiveActive ? <PhoneOff className="w-4 h-4" /> : <Phone className="w-4 h-4" />}</span>
+                <span className="hidden sm:inline">{isCallActive ? "End Session" : "Start Voice Assistant"}</span>
+                <span className="sm:hidden">{isCallActive ? <PhoneOff className="w-4 h-4" /> : <Phone className="w-4 h-4" />}</span>
               </button>
            </div>
         </header>
@@ -809,7 +970,7 @@ export default function ChatRoom() {
                  {messages.length === 0 ? (
                    <div className="flex-1 flex flex-col items-center justify-center text-center space-y-6 py-20 opacity-20">
                       <h1 className="text-6xl md:text-9xl font-black uppercase tracking-tighter text-white">Discovery</h1>
-                      <p className="text-sm md:text-xl font-medium max-w-sm text-zinc-500">Commence the case analysis by typed input or starting a voice discovery session.</p>
+                      <p className="text-sm md:text-xl font-medium max-w-sm text-zinc-500">Commence the case analysis by starting a live voice session.</p>
                    </div>
                  ) : (
                     <div className="flex flex-col gap-4">
@@ -870,7 +1031,7 @@ export default function ChatRoom() {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 10 }}
-              className="absolute bottom-24 right-4 md:bottom-[160px] md:right-12 w-40 sm:w-56 md:w-72 aspect-video bg-black rounded-2xl md:rounded-3xl overflow-hidden border border-[#3f3f46] shadow-[0_32px_64px_rgba(0,0,0,0.8)] z-20 group"
+              className="absolute bottom-24 right-4 md:bottom-40 md:right-12 w-40 sm:w-56 md:w-72 aspect-video bg-black rounded-2xl md:rounded-3xl overflow-hidden border border-[#3f3f46] shadow-[0_32px_64px_rgba(0,0,0,0.8)] z-20 group"
             >
                <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover" />
                <div className="absolute top-2 left-2 md:top-4 md:left-4 flex items-center gap-1.5 md:gap-2 bg-black/60 backdrop-blur-md px-2 md:px-3 py-1 md:py-1.5 rounded-lg md:rounded-xl border border-white/10">
@@ -887,7 +1048,7 @@ export default function ChatRoom() {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="absolute inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+              className="absolute inset-0 z-100 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
             >
               <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-6 md:p-8 max-w-md w-full shadow-2xl space-y-6 text-center">
                 <div className="w-16 h-16 bg-[#3b82f6]/10 rounded-full flex items-center justify-center mx-auto">
@@ -948,75 +1109,7 @@ export default function ChatRoom() {
           )}
         </AnimatePresence>
 
-        {/* Input Area */}
-        <AnimatePresence>
-          {activeView === 'text' && !isCallActive && (
-            <motion.div 
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 20 }}
-              className="absolute bottom-0 left-0 right-0 p-4 md:p-8 z-20 bg-gradient-to-t from-[#050505] via-[#050505] to-transparent pt-12"
-            >
-               <form 
-                 onSubmit={handleSendMessage}
-                 className="max-w-3xl mx-auto flex items-center gap-2 md:gap-4 bg-[#18181b] border border-[#27272a] p-2 md:p-3 pr-2 md:pr-3 rounded-2xl md:rounded-[2rem] shadow-[0_20px_40px_rgba(0,0,0,0.8)] focus-within:border-[#3b82f6] transition-all"
-               >
-                  <label className="p-2 md:p-3 text-zinc-400 hover:text-[#3b82f6] hover:bg-[#3b82f6]/10 rounded-xl cursor-pointer transition-colors shrink-0">
-                    <input 
-                      type="file" 
-                      className="hidden"
-                      onChange={async (e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          try {
-                            const formData = new FormData();
-                            formData.append("file", file);
-                            const res = await fetch("/api/extract", {
-                              method: "POST",
-                              body: formData,
-                            });
-                            
-                            let data;
-                            const contentType = res.headers.get("content-type");
-                            if (contentType && contentType.includes("application/json")) {
-                              data = await res.json();
-                            } else {
-                              const textResult = await res.text();
-                              console.error("Non-JSON response:", textResult.substring(0, 200));
-                              throw new Error("Server returned an invalid non-JSON response.");
-                            }
-
-                            if (!res.ok) throw new Error(data.error || "Extraction failed");
-                            
-                            setInputText(prev => prev + `\n[File Attached: ${data.name}]\n${data.text}\n`);
-                          } catch (err) {
-                            console.error(err);
-                            setInputText(prev => prev + `\n[Error: Failed to process file ${file.name}: ${(err as Error).message}]\n`);
-                          }
-                        }
-                        e.target.value = ''; // Reset input
-                      }}
-                    />
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-                  </label>
-                  <input 
-                    type="text" 
-                    value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
-                    placeholder="Ask anything..." 
-                    className="flex-1 bg-transparent border-none text-sm outline-none text-white placeholder-zinc-600 font-medium min-w-0"
-                  />
-                  <button 
-                    type="submit"
-                    disabled={!inputText.trim()}
-                    className="px-6 md:px-8 py-2 md:py-3 bg-white text-black rounded-lg md:rounded-xl font-bold text-[10px] md:text-xs tracking-wider md:tracking-widest hover:bg-[#3b82f6] hover:text-white transition-all disabled:opacity-20 shrink-0"
-                  >
-                    Send
-                  </button>
-               </form>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* Voice-first mode: text input removed intentionally */}
       </main>
 
     </div>

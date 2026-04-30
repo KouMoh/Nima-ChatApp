@@ -16,6 +16,7 @@ export function useGeminiLive(options?: { onTurnComplete?: (text: string) => voi
   
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
   const microphoneRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<AudioWorkletNode | ScriptProcessorNode | null>(null);
   const audioQueueRef = useRef<Float32Array[]>([]);
@@ -84,6 +85,13 @@ export function useGeminiLive(options?: { onTurnComplete?: (text: string) => voi
 
   const stop = useCallback(() => {
     clearSilenceTimer();
+    audioQueueRef.current = [];
+    isPlayingRef.current = false;
+    if (currentAudioSourceRef.current) {
+      currentAudioSourceRef.current.onended = null;
+      try { currentAudioSourceRef.current.stop(); } catch (_e) {}
+      currentAudioSourceRef.current = null;
+    }
     if (sessionRef.current) {
       sessionRef.current.close();
       sessionRef.current = null;
@@ -96,8 +104,14 @@ export function useGeminiLive(options?: { onTurnComplete?: (text: string) => voi
       microphoneRef.current.disconnect();
       microphoneRef.current = null;
     }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+    setAiTranscription("");
+    setTranscription("");
     setIsActive(false);
-  }, []);
+  }, [clearSilenceTimer]);
 
   const start = useCallback(async (systemInstruction: string = "You are a helpful assistant.", voiceName: string = "Zephyr", historyContext: string = "") => {
     try {
@@ -113,6 +127,7 @@ export function useGeminiLive(options?: { onTurnComplete?: (text: string) => voi
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
       microphoneRef.current = audioContextRef.current.createMediaStreamSource(stream);
       
       // ScriptProcessor is deprecated but easier for a quick implementation without separate worklet files
